@@ -90,6 +90,7 @@ dual_channel_iterator :: proc(
 	iter: Dual_Channel_Iterator,
 	ok: bool,
 ) {
+	// TODO: Just assert?
 	if area.first % 8 != 0 {
 		log.errorf("channel offset not byte-aligned: first_bits={}", area.first)
 		return
@@ -121,34 +122,18 @@ dual_channel_next :: proc(iter: ^Dual_Channel_Iterator) -> (^Frame, uint, bool) 
 	return ptr, frame_offset, true
 }
 
-generate_sine :: proc(
-	buffer_size: alsa.Pcm_Uframes,
-	area: ^alsa.Pcm_Channel_Area,
-	offset: alsa.Pcm_Uframes,
-	space: alsa.Pcm_Uframes,
-	freq: f32,
-	amp: f32,
-	phase: ^f32,
-) -> (
-	frames: alsa.Pcm_Uframes,
-	ok: bool,
-) {
-	iter := dual_channel_iterator(buffer_size, area, offset, space) or_return
-
-	dt: f32 : 1.0 / SAMPLE_RATE
+generate_sine :: proc(frame_iter: ^Dual_Channel_Iterator, freq: f32, amp: f32, phase: ^f32) {
 	sample_amp := f32(max(i16)) * amp
-	scalar := math.TAU * freq * dt
+	dt := math.TAU / SAMPLE_RATE * freq
 
-	ph: f32 = phase^
-	for frame, index in dual_channel_next(&iter) {
-		sample := sample_amp * math.sin(ph)
+	t: f32 = phase^
+	for frame, index in dual_channel_next(frame_iter) {
+		sample := sample_amp * math.sin(t)
 		frame^ = {i16(sample), i16(sample)}
-		ph += scalar
-		if ph > math.TAU do ph -= math.TAU
+		t += dt
+		if t > math.TAU do t -= math.TAU
 	}
-	// phase^ = math.mod(phase^ + scalar * f32(iter.frame_count), math.TAU)
-	phase^ = ph
-	return alsa.Pcm_Uframes(iter.frame_count), true
+	phase^ = t
 }
 
 audio_write_sine_wave :: proc(state: ^Audio_State) -> Audio_Error {
@@ -196,25 +181,16 @@ audio_write_sine_wave :: proc(state: ^Audio_State) -> Audio_Error {
 			return .Failed
 		}
 
-		frames_written, ok := generate_sine(
-			state.buffer_size,
-			area,
-			offset,
-			space,
-			freq = state.freq,
-			amp = state.amp,
-			phase = &state.phase,
-		)
-		if !ok {
-			log.error("failed to generate sine wave")
-			return .Failed
-		}
+		frame_iter, ok := dual_channel_iterator(state.buffer_size, area, offset, space)
+		if !ok do return .Failed
 
-		if err := alsa.pcm_mmap_commit(state.pcm, offset, frames_written); err < 0 {
+		generate_sine(&frame_iter, freq = state.freq, amp = state.amp, phase = &state.phase)
+
+		if err := alsa.pcm_mmap_commit(state.pcm, offset, space); err < 0 {
 			log.error("failed to commit mmap area:", alsa.strerror(i32(err)))
 			return .Failed
-		} else if alsa.Pcm_Uframes(err) != frames_written {
-			log.warnf("short commit: expected={} got={}", frames_written, err)
+		} else if alsa.Pcm_Uframes(err) != space {
+			log.warnf("short commit: expected={} got={}", space, err)
 		}
 
 		// Start after putting something in the buffer
