@@ -11,6 +11,9 @@ SAMPLE_RATE :: 48000
 BUF_DURATION_SEC :: 2
 BUF_FRAME_COUNT :: BUF_DURATION_SEC * SAMPLE_RATE
 
+// 15 FPS
+LATENCY_US :: 1_000_000 / 15
+
 Frame :: struct #packed {
 	l: i16,
 	r: i16,
@@ -46,7 +49,7 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 		channels = 2,
 		rate = SAMPLE_RATE,
 		soft_resample = .Enable,
-		latency = 500_000,
+		latency = LATENCY_US,
 	); err != 0 {
 		log.error("failed to configure audio device:", alsa.strerror(err))
 		return .Failed
