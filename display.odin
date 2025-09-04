@@ -3,10 +3,10 @@ package main
 import "core:log"
 import "core:math/rand"
 import "core:mem"
-import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import "core:sys/posix"
+
 import "wayland"
 
 DISPLAY_POLL_FDS :: 1

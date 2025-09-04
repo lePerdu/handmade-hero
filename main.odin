@@ -1,14 +1,7 @@
 package main
 
-import "core:c"
-import "core:container/bit_array"
-import "core:fmt"
 import "core:log"
-import "core:math/rand"
-import "core:mem"
 import "core:os"
-import "core:path/filepath"
-import "core:strings"
 import "core:sys/posix"
 
 import "wayland"

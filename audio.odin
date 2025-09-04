@@ -3,9 +3,8 @@ package main
 import "core:c"
 import "core:log"
 import "core:math"
-import "core:math/rand"
-import "core:mem"
 import "core:sys/posix"
+
 foreign import asound "system:libasound.so.2"
 
 Pcm :: distinct rawptr
@@ -313,10 +312,10 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 	)
 
 	// TODO: Is this necessary?
-	if err := pcm_prepare(state.pcm); err != 0 {
-		log.error("failed to prepare audio device:", strerror(err))
-		return .Failed
-	}
+	// if err := pcm_prepare(state.pcm); err != 0 {
+	// 	log.error("failed to prepare audio device:", strerror(err))
+	// 	return .Failed
+	// }
 
 	// log.debug("prepared audio device: buf_size={} sbits={}", buf_size, sig_bits)
 	return nil
@@ -431,13 +430,6 @@ audio_write_sine_wave :: proc(state: ^Audio_State) -> Audio_Error {
 			return nil
 		}
 
-		if need_start {
-			if err := pcm_start(state.pcm); err != 0 {
-				log.error("failed to start audio device:", strerror(err))
-				return .Failed
-			}
-		}
-
 		// TODO: Repeat just this section if possible to avoid re-checking status?
 
 		area: [^]Pcm_Channel_Area // Multi-pointer for the API
@@ -466,7 +458,15 @@ audio_write_sine_wave :: proc(state: ^Audio_State) -> Audio_Error {
 			log.error("failed to commit mmap area:", strerror(i32(err)))
 			return .Failed
 		} else if Pcm_Uframes(err) != frames_written {
-			log.warn("short commit: expected={} got={}", frames_written, err)
+			log.warnf("short commit: expected={} got={}", frames_written, err)
+		}
+
+		// Start after putting something in the buffer
+		if need_start {
+			if err := pcm_start(state.pcm); err != 0 {
+				log.error("failed to start audio device:", strerror(err))
+				return .Failed
+			}
 		}
 	}
 }
