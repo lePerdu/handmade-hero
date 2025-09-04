@@ -1,0 +1,21 @@
+[
+  {
+    "label": "Debug",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "handmade",
+    "build": {
+      "command": "odin build . -debug"
+    }
+  },
+  {
+    "label": "Debug scanner",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "scanner",
+    "args": ["/usr/share/wayland/wayland.xml", "wayland/wayland_protocol.odin"],
+    "build": {
+      "command": "odin build wayland/scanner -debug"
+    }
+  }
+]

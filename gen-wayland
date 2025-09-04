@@ -1,0 +1,4 @@
+#!/bin/sh
+odin build wayland/scanner
+./scanner /usr/share/wayland/wayland.xml wayland/wayland_protocol.odin
+./scanner /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml wayland/xdg_shell_protocol.odin
