@@ -1,9 +1,11 @@
 package main
 
+import "base:intrinsics"
 import "core:log"
 import "core:mem"
 import "core:os"
 import "core:sys/posix"
+import "core:time"
 
 import "wayland"
 
@@ -12,8 +14,28 @@ Game_State :: struct {
 	audio:   Audio_State,
 }
 
-event_loop :: proc(state: ^Game_State) {
+main :: proc() {
+	context.logger = log.create_console_logger(lowest = .Debug)
+
+	state: Game_State
+
+	if !display_init(&state.display) do os.exit(1)
+
+	if audio_init(&state.audio) != nil do os.exit(1)
+	state.audio.freq = 420.0
+	// defer audio_destroy(&state.audio)
+
+	game_loop(&state)
+}
+
+game_loop :: proc(state: ^Game_State) {
+	last_loop_ns: i64
+
 	loop: for !state.display.close_requested {
+		counter_start_wall_ns := get_perf_counter_wall_ns()
+		counter_start_cpu_ns := get_perf_counter_cpu_ns()
+		counter_start_cpu_cycles := get_perf_counter_cpu_cycles()
+
 		// Fixed-capacity dynamic array
 		// TODO: Use temp_allocator with intial size to avoid pre-allocating a "worst-case"?
 		// NOTE: If that is changed, we can't take references to slices of the dynamic array for
@@ -50,19 +72,34 @@ event_loop :: proc(state: ^Game_State) {
 		audio_handle_poll(&state.audio, audio_poll) or_break
 
 		free_all(context.temp_allocator)
+
+		counter_total_wall_ns := get_perf_counter_wall_ns() - counter_start_wall_ns
+		counter_total_cpu_ns := get_perf_counter_cpu_ns() - counter_start_cpu_ns
+		counter_total_cpu_cycles := get_perf_counter_cpu_cycles() - counter_start_cpu_cycles
+
+		log.infof(
+			"perf counter: wall={}ms  cpu={}ms  cycles={}K",
+			counter_total_wall_ns / 1000,
+			counter_total_cpu_ns / 1000,
+			counter_total_cpu_cycles / 1000,
+		)
 	}
 }
 
-main :: proc() {
-	context.logger = log.create_console_logger(lowest = .Info)
-
-	state: Game_State
-
-	if !display_init(&state.display) do os.exit(1)
-
-	if audio_init(&state.audio) != nil do os.exit(1)
-	state.audio.freq = 420.0
-	// defer audio_destroy(&state.audio)
-
-	event_loop(&state)
+get_perf_counter_wall_ns :: proc() -> u64 {
+	t: posix.timespec
+	if posix.clock_gettime(.MONOTONIC, &t) != .OK {
+		return 0
+	}
+	return u64(t.tv_sec) * 1_000_000_000 + u64(t.tv_nsec)
 }
+
+get_perf_counter_cpu_ns :: proc() -> u64 {
+	t: posix.timespec
+	if posix.clock_gettime(.PROCESS_CPUTIME_ID, &t) != .OK {
+		return 0
+	}
+	return u64(t.tv_sec) * 1_000_000_000 + u64(t.tv_nsec)
+}
+
+get_perf_counter_cpu_cycles :: intrinsics.read_cycle_counter

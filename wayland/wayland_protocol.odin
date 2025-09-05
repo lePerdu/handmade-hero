@@ -28,8 +28,6 @@
 
 package wayland
 
-import "core:bytes"
-import "core:io"
 import "core:log"
 import "core:sys/posix"
 
@@ -69,11 +67,17 @@ WL_DISPLAY_SYNC_OPCODE: Opcode : 0
 // The callback_data passed in the callback is the event serial.
 // - callback: callback object for the sync request
 wl_display_sync :: proc(conn_: ^Connection, target_: Wl_Display, ) -> (callback: Wl_Callback, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_DISPLAY_SYNC_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DISPLAY_SYNC_OPCODE, msg_size_)
 	callback = connection_alloc_id(conn_) or_return
-	message_write(writer_, callback) or_return
+	message_write(&writer_, callback)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_display" + "@{}." + "sync" + ":" + " " + "callback" + "={}", target_, callback)
 	return
 }
@@ -92,11 +96,17 @@ WL_DISPLAY_GET_REGISTRY_OPCODE: Opcode : 1
 // possible to avoid wasting memory.
 // - registry: global registry object
 wl_display_get_registry :: proc(conn_: ^Connection, target_: Wl_Display, ) -> (registry: Wl_Registry, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_DISPLAY_GET_REGISTRY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DISPLAY_GET_REGISTRY_OPCODE, msg_size_)
 	registry = connection_alloc_id(conn_) or_return
-	message_write(writer_, registry) or_return
+	message_write(&writer_, registry)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_display" + "@{}." + "get_registry" + ":" + " " + "registry" + "={}", target_, registry)
 	return
 }
@@ -123,17 +133,12 @@ WL_DISPLAY_ERROR_EVENT_OPCODE: Event_Opcode : 0
 wl_display_error_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Display_Error_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DISPLAY_ERROR_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.object_id = message_read_object_id(&reader, Object_Id) or_return
 	event.code = message_read_u32(&reader) or_return
 	event.message = message_read_string(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_display" + "@{}." + "error" + ":" + " " + "object_id" + "={}" + " " + "code" + "={}" + " " + "message" + "={}", event.target, event.object_id, event.code, event.message)
 	return
 }
@@ -154,15 +159,10 @@ WL_DISPLAY_DELETE_ID_EVENT_OPCODE: Event_Opcode : 1
 wl_display_delete_id_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Display_Delete_Id_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DISPLAY_DELETE_ID_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.id = message_read_u32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_display" + "@{}." + "delete_id" + ":" + " " + "id" + "={}", event.target, event.id)
 	return
 }
@@ -199,15 +199,21 @@ WL_REGISTRY_BIND_OPCODE: Opcode : 0
 // - name: unique numeric name of the object
 // - id: bounded object
 wl_registry_bind :: proc(conn_: ^Connection, target_: Wl_Registry, name: u32, interface: string, version: u32, ) -> (id: Object_Id, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 12
+	msg_size_: u16 = message_header_size + 16
 	msg_size_ += message_string_size(len(interface))
-	message_write_header(writer_, target_, WL_REGISTRY_BIND_OPCODE, msg_size_) or_return
-	message_write(writer_, name) or_return
-	message_write(writer_, interface) or_return
-	message_write(writer_, version) or_return
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_REGISTRY_BIND_OPCODE, msg_size_)
+	message_write(&writer_, name)
+	message_write(&writer_, interface)
+	message_write(&writer_, version)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
+	message_write(&writer_, id)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_registry" + "@{}." + "bind" + ":" + " " + "name" + "={}" + " " + "interface" + "={}" + " " + "version" + "={}" + " " + "id" + "={}", target_, name, interface, version, id)
 	return
 }
@@ -232,17 +238,12 @@ WL_REGISTRY_GLOBAL_EVENT_OPCODE: Event_Opcode : 0
 wl_registry_global_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Registry_Global_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_REGISTRY_GLOBAL_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.name = message_read_u32(&reader) or_return
 	event.interface = message_read_string(&reader) or_return
 	event.version = message_read_u32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_registry" + "@{}." + "global" + ":" + " " + "name" + "={}" + " " + "interface" + "={}" + " " + "version" + "={}", event.target, event.name, event.interface, event.version)
 	return
 }
@@ -268,15 +269,10 @@ WL_REGISTRY_GLOBAL_REMOVE_EVENT_OPCODE: Event_Opcode : 1
 wl_registry_global_remove_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Registry_Global_Remove_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_REGISTRY_GLOBAL_REMOVE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.name = message_read_u32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_registry" + "@{}." + "global_remove" + ":" + " " + "name" + "={}", event.target, event.name)
 	return
 }
@@ -302,16 +298,11 @@ WL_CALLBACK_DONE_EVENT_OPCODE: Event_Opcode : 0
 wl_callback_done_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Callback_Done_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_CALLBACK_DONE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.callback_data = message_read_u32(&reader) or_return
+	message_reader_check_empty(reader) or_return
 	connection_free_id(conn, message.header.target)
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
 	log.debugf("<- " + "wl_callback" + "@{}." + "done" + ":" + " " + "callback_data" + "={}", event.target, event.callback_data)
 	return
 }
@@ -329,11 +320,17 @@ WL_COMPOSITOR_CREATE_SURFACE_OPCODE: Opcode : 0
 // Ask the compositor to create a new surface.
 // - id: the new surface
 wl_compositor_create_surface :: proc(conn_: ^Connection, target_: Wl_Compositor, ) -> (id: Wl_Surface, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_COMPOSITOR_CREATE_SURFACE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_COMPOSITOR_CREATE_SURFACE_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
+	message_write(&writer_, id)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_compositor" + "@{}." + "create_surface" + ":" + " " + "id" + "={}", target_, id)
 	return
 }
@@ -344,11 +341,17 @@ WL_COMPOSITOR_CREATE_REGION_OPCODE: Opcode : 1
 // Ask the compositor to create a new region.
 // - id: the new region
 wl_compositor_create_region :: proc(conn_: ^Connection, target_: Wl_Compositor, ) -> (id: Wl_Region, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_COMPOSITOR_CREATE_REGION_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_COMPOSITOR_CREATE_REGION_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
+	message_write(&writer_, id)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_compositor" + "@{}." + "create_region" + ":" + " " + "id" + "={}", target_, id)
 	return
 }
@@ -385,16 +388,22 @@ WL_SHM_POOL_CREATE_BUFFER_OPCODE: Opcode : 0
 // - stride: number of bytes from the beginning of one row to the beginning of the next row
 // - format: buffer pixel format
 wl_shm_pool_create_buffer :: proc(conn_: ^Connection, target_: Wl_Shm_Pool, offset: i32, width: i32, height: i32, stride: i32, format: Wl_Shm_Format_Enum, ) -> (id: Wl_Buffer, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 24
-	message_write_header(writer_, target_, WL_SHM_POOL_CREATE_BUFFER_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 24
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHM_POOL_CREATE_BUFFER_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
-	message_write(writer_, offset) or_return
-	message_write(writer_, width) or_return
-	message_write(writer_, height) or_return
-	message_write(writer_, stride) or_return
-	message_write(writer_, format) or_return
+	message_write(&writer_, id)
+	message_write(&writer_, offset)
+	message_write(&writer_, width)
+	message_write(&writer_, height)
+	message_write(&writer_, stride)
+	message_write(&writer_, format)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shm_pool" + "@{}." + "create_buffer" + ":" + " " + "id" + "={}" + " " + "offset" + "={}" + " " + "width" + "={}" + " " + "height" + "={}" + " " + "stride" + "={}" + " " + "format" + "={}", target_, id, offset, width, height, stride, format)
 	return
 }
@@ -408,9 +417,15 @@ WL_SHM_POOL_DESTROY_OPCODE: Opcode : 1
 // buffers that have been created from this pool
 // are gone.
 wl_shm_pool_destroy :: proc(conn_: ^Connection, target_: Wl_Shm_Pool, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_SHM_POOL_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHM_POOL_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_shm_pool" + "@{}." + "destroy" + ":", target_)
 	return
@@ -431,10 +446,16 @@ WL_SHM_POOL_RESIZE_OPCODE: Opcode : 2
 // the new pool size.
 // - size: new size of the pool, in bytes
 wl_shm_pool_resize :: proc(conn_: ^Connection, target_: Wl_Shm_Pool, size: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SHM_POOL_RESIZE_OPCODE, msg_size_) or_return
-	message_write(writer_, size) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHM_POOL_RESIZE_OPCODE, msg_size_)
+	message_write(&writer_, size)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shm_pool" + "@{}." + "resize" + ":" + " " + "size" + "={}", target_, size)
 	return
 }
@@ -695,13 +716,19 @@ WL_SHM_CREATE_POOL_OPCODE: Opcode : 0
 // - fd: file descriptor for the pool
 // - size: pool size, in bytes
 wl_shm_create_pool :: proc(conn_: ^Connection, target_: Wl_Shm, fd: posix.FD, size: i32, ) -> (id: Wl_Shm_Pool, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, WL_SHM_CREATE_POOL_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHM_CREATE_POOL_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
+	message_write(&writer_, id)
 	connection_write_fd(conn_, fd) or_return
-	message_write(writer_, size) or_return
+	message_write(&writer_, size)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shm" + "@{}." + "create_pool" + ":" + " " + "id" + "={}" + " " + "fd" + "={}" + " " + "size" + "={}", target_, id, fd, size)
 	return
 }
@@ -719,15 +746,10 @@ WL_SHM_FORMAT_EVENT_OPCODE: Event_Opcode : 0
 wl_shm_format_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Shm_Format_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_SHM_FORMAT_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.format = message_read_enum(&reader, Wl_Shm_Format_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_shm" + "@{}." + "format" + ":" + " " + "format" + "={}", event.target, event.format)
 	return
 }
@@ -757,9 +779,15 @@ WL_BUFFER_DESTROY_OPCODE: Opcode : 0
 // 
 // For possible side-effects to a surface, see wl_surface.attach.
 wl_buffer_destroy :: proc(conn_: ^Connection, target_: Wl_Buffer, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_BUFFER_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_BUFFER_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_buffer" + "@{}." + "destroy" + ":", target_)
 	return
@@ -786,14 +814,9 @@ WL_BUFFER_RELEASE_EVENT_OPCODE: Event_Opcode : 0
 wl_buffer_release_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Buffer_Release_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_BUFFER_RELEASE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_buffer" + "@{}." + "release" + ":", event.target)
 	return
 }
@@ -838,12 +861,18 @@ WL_DATA_OFFER_ACCEPT_OPCODE: Opcode : 0
 // - serial: serial number of the accept request
 // - mime_type: mime type accepted by the client
 wl_data_offer_accept :: proc(conn_: ^Connection, target_: Wl_Data_Offer, serial: u32, mime_type: string, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
+	msg_size_: u16 = message_header_size + 8
 	msg_size_ += message_string_size(len(mime_type))
-	message_write_header(writer_, target_, WL_DATA_OFFER_ACCEPT_OPCODE, msg_size_) or_return
-	message_write(writer_, serial) or_return
-	message_write(writer_, mime_type) or_return
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_OFFER_ACCEPT_OPCODE, msg_size_)
+	message_write(&writer_, serial)
+	message_write(&writer_, mime_type)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_data_offer" + "@{}." + "accept" + ":" + " " + "serial" + "={}" + " " + "mime_type" + "={}", target_, serial, mime_type)
 	return
 }
@@ -869,12 +898,18 @@ WL_DATA_OFFER_RECEIVE_OPCODE: Opcode : 1
 // - mime_type: mime type desired by receiver
 // - fd: file descriptor for data transfer
 wl_data_offer_receive :: proc(conn_: ^Connection, target_: Wl_Data_Offer, mime_type: string, fd: posix.FD, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
+	msg_size_: u16 = message_header_size + 4
 	msg_size_ += message_string_size(len(mime_type))
-	message_write_header(writer_, target_, WL_DATA_OFFER_RECEIVE_OPCODE, msg_size_) or_return
-	message_write(writer_, mime_type) or_return
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_OFFER_RECEIVE_OPCODE, msg_size_)
+	message_write(&writer_, mime_type)
 	connection_write_fd(conn_, fd) or_return
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_data_offer" + "@{}." + "receive" + ":" + " " + "mime_type" + "={}" + " " + "fd" + "={}", target_, mime_type, fd)
 	return
 }
@@ -884,9 +919,15 @@ WL_DATA_OFFER_DESTROY_OPCODE: Opcode : 2
 //
 // Destroy the data offer.
 wl_data_offer_destroy :: proc(conn_: ^Connection, target_: Wl_Data_Offer, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_DATA_OFFER_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_OFFER_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_data_offer" + "@{}." + "destroy" + ":", target_)
 	return
@@ -910,9 +951,15 @@ WL_DATA_OFFER_FINISH_OPCODE: Opcode : 3
 // If wl_data_offer.finish request is received for a non drag and drop
 // operation, the invalid_finish protocol error is raised.
 wl_data_offer_finish :: proc(conn_: ^Connection, target_: Wl_Data_Offer, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_DATA_OFFER_FINISH_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_OFFER_FINISH_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_data_offer" + "@{}." + "finish" + ":", target_)
 	return
 }
@@ -954,11 +1001,17 @@ WL_DATA_OFFER_SET_ACTIONS_OPCODE: Opcode : 4
 // - dnd_actions: actions supported by the destination client
 // - preferred_action: action preferred by the destination client
 wl_data_offer_set_actions :: proc(conn_: ^Connection, target_: Wl_Data_Offer, dnd_actions: Wl_Data_Device_Manager_Dnd_Action_Enum, preferred_action: Wl_Data_Device_Manager_Dnd_Action_Enum, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, WL_DATA_OFFER_SET_ACTIONS_OPCODE, msg_size_) or_return
-	message_write(writer_, dnd_actions) or_return
-	message_write(writer_, preferred_action) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_OFFER_SET_ACTIONS_OPCODE, msg_size_)
+	message_write(&writer_, dnd_actions)
+	message_write(&writer_, preferred_action)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_data_offer" + "@{}." + "set_actions" + ":" + " " + "dnd_actions" + "={}" + " " + "preferred_action" + "={}", target_, dnd_actions, preferred_action)
 	return
 }
@@ -976,15 +1029,10 @@ WL_DATA_OFFER_OFFER_EVENT_OPCODE: Event_Opcode : 0
 wl_data_offer_offer_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Offer_Offer_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_OFFER_OFFER_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.mime_type = message_read_string(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_offer" + "@{}." + "offer" + ":" + " " + "mime_type" + "={}", event.target, event.mime_type)
 	return
 }
@@ -1003,15 +1051,10 @@ WL_DATA_OFFER_SOURCE_ACTIONS_EVENT_OPCODE: Event_Opcode : 1
 wl_data_offer_source_actions_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Offer_Source_Actions_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_OFFER_SOURCE_ACTIONS_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.source_actions = message_read_enum(&reader, Wl_Data_Device_Manager_Dnd_Action_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_offer" + "@{}." + "source_actions" + ":" + " " + "source_actions" + "={}", event.target, event.source_actions)
 	return
 }
@@ -1061,15 +1104,10 @@ WL_DATA_OFFER_ACTION_EVENT_OPCODE: Event_Opcode : 2
 wl_data_offer_action_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Offer_Action_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_OFFER_ACTION_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.dnd_action = message_read_enum(&reader, Wl_Data_Device_Manager_Dnd_Action_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_offer" + "@{}." + "action" + ":" + " " + "dnd_action" + "={}", event.target, event.dnd_action)
 	return
 }
@@ -1096,11 +1134,17 @@ WL_DATA_SOURCE_OFFER_OPCODE: Opcode : 0
 // multiple types.
 // - mime_type: mime type offered by the data source
 wl_data_source_offer :: proc(conn_: ^Connection, target_: Wl_Data_Source, mime_type: string, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
+	msg_size_: u16 = message_header_size + 4
 	msg_size_ += message_string_size(len(mime_type))
-	message_write_header(writer_, target_, WL_DATA_SOURCE_OFFER_OPCODE, msg_size_) or_return
-	message_write(writer_, mime_type) or_return
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_SOURCE_OFFER_OPCODE, msg_size_)
+	message_write(&writer_, mime_type)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_data_source" + "@{}." + "offer" + ":" + " " + "mime_type" + "={}", target_, mime_type)
 	return
 }
@@ -1110,9 +1154,15 @@ WL_DATA_SOURCE_DESTROY_OPCODE: Opcode : 1
 //
 // Destroy the data source.
 wl_data_source_destroy :: proc(conn_: ^Connection, target_: Wl_Data_Source, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_DATA_SOURCE_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_SOURCE_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_data_source" + "@{}." + "destroy" + ":", target_)
 	return
@@ -1136,10 +1186,16 @@ WL_DATA_SOURCE_SET_ACTIONS_OPCODE: Opcode : 2
 // for drag-and-drop will raise a protocol error.
 // - dnd_actions: actions supported by the data source
 wl_data_source_set_actions :: proc(conn_: ^Connection, target_: Wl_Data_Source, dnd_actions: Wl_Data_Device_Manager_Dnd_Action_Enum, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_DATA_SOURCE_SET_ACTIONS_OPCODE, msg_size_) or_return
-	message_write(writer_, dnd_actions) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_SOURCE_SET_ACTIONS_OPCODE, msg_size_)
+	message_write(&writer_, dnd_actions)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_data_source" + "@{}." + "set_actions" + ":" + " " + "dnd_actions" + "={}", target_, dnd_actions)
 	return
 }
@@ -1159,15 +1215,10 @@ WL_DATA_SOURCE_TARGET_EVENT_OPCODE: Event_Opcode : 0
 wl_data_source_target_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Source_Target_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_SOURCE_TARGET_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.mime_type = message_read_string(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_source" + "@{}." + "target" + ":" + " " + "mime_type" + "={}", event.target, event.mime_type)
 	return
 }
@@ -1188,16 +1239,11 @@ WL_DATA_SOURCE_SEND_EVENT_OPCODE: Event_Opcode : 1
 wl_data_source_send_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Source_Send_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_SOURCE_SEND_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.mime_type = message_read_string(&reader) or_return
 	event.fd = connection_read_fd(conn) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_source" + "@{}." + "send" + ":" + " " + "mime_type" + "={}" + " " + "fd" + "={}", event.target, event.mime_type, event.fd)
 	return
 }
@@ -1231,14 +1277,9 @@ WL_DATA_SOURCE_CANCELLED_EVENT_OPCODE: Event_Opcode : 2
 wl_data_source_cancelled_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Source_Cancelled_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_SOURCE_CANCELLED_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_source" + "@{}." + "cancelled" + ":", event.target)
 	return
 }
@@ -1261,14 +1302,9 @@ WL_DATA_SOURCE_DND_DROP_PERFORMED_EVENT_OPCODE: Event_Opcode : 3
 wl_data_source_dnd_drop_performed_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Source_Dnd_Drop_Performed_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_SOURCE_DND_DROP_PERFORMED_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_source" + "@{}." + "dnd_drop_performed" + ":", event.target)
 	return
 }
@@ -1288,14 +1324,9 @@ WL_DATA_SOURCE_DND_FINISHED_EVENT_OPCODE: Event_Opcode : 4
 wl_data_source_dnd_finished_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Source_Dnd_Finished_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_SOURCE_DND_FINISHED_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_source" + "@{}." + "dnd_finished" + ":", event.target)
 	return
 }
@@ -1335,15 +1366,10 @@ WL_DATA_SOURCE_ACTION_EVENT_OPCODE: Event_Opcode : 5
 wl_data_source_action_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Source_Action_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_SOURCE_ACTION_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.dnd_action = message_read_enum(&reader, Wl_Data_Device_Manager_Dnd_Action_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_source" + "@{}." + "action" + ":" + " " + "dnd_action" + "={}", event.target, event.dnd_action)
 	return
 }
@@ -1394,13 +1420,19 @@ WL_DATA_DEVICE_START_DRAG_OPCODE: Opcode : 0
 // - icon: drag-and-drop icon surface
 // - serial: serial number of the implicit grab on the origin
 wl_data_device_start_drag :: proc(conn_: ^Connection, target_: Wl_Data_Device, source: Wl_Data_Source, origin: Wl_Surface, icon: Wl_Surface, serial: u32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 16
-	message_write_header(writer_, target_, WL_DATA_DEVICE_START_DRAG_OPCODE, msg_size_) or_return
-	message_write(writer_, source) or_return
-	message_write(writer_, origin) or_return
-	message_write(writer_, icon) or_return
-	message_write(writer_, serial) or_return
+	msg_size_: u16 = message_header_size + 16
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_DEVICE_START_DRAG_OPCODE, msg_size_)
+	message_write(&writer_, source)
+	message_write(&writer_, origin)
+	message_write(&writer_, icon)
+	message_write(&writer_, serial)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_data_device" + "@{}." + "start_drag" + ":" + " " + "source" + "={}" + " " + "origin" + "={}" + " " + "icon" + "={}" + " " + "serial" + "={}", target_, source, origin, icon, serial)
 	return
 }
@@ -1415,11 +1447,17 @@ WL_DATA_DEVICE_SET_SELECTION_OPCODE: Opcode : 1
 // - source: data source for the selection
 // - serial: serial number of the event that triggered this request
 wl_data_device_set_selection :: proc(conn_: ^Connection, target_: Wl_Data_Device, source: Wl_Data_Source, serial: u32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, WL_DATA_DEVICE_SET_SELECTION_OPCODE, msg_size_) or_return
-	message_write(writer_, source) or_return
-	message_write(writer_, serial) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_DEVICE_SET_SELECTION_OPCODE, msg_size_)
+	message_write(&writer_, source)
+	message_write(&writer_, serial)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_data_device" + "@{}." + "set_selection" + ":" + " " + "source" + "={}" + " " + "serial" + "={}", target_, source, serial)
 	return
 }
@@ -1429,9 +1467,15 @@ WL_DATA_DEVICE_RELEASE_OPCODE: Opcode : 2
 //
 // This request destroys the data device.
 wl_data_device_release :: proc(conn_: ^Connection, target_: Wl_Data_Device, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_DATA_DEVICE_RELEASE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_DEVICE_RELEASE_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_data_device" + "@{}." + "release" + ":", target_)
 	return
@@ -1455,15 +1499,10 @@ WL_DATA_DEVICE_DATA_OFFER_EVENT_OPCODE: Event_Opcode : 0
 wl_data_device_data_offer_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Device_Data_Offer_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_DEVICE_DATA_OFFER_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.id = message_read_object_id(&reader, Wl_Data_Offer) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_device" + "@{}." + "data_offer" + ":" + " " + "id" + "={}", event.target, event.id)
 	return
 }
@@ -1491,19 +1530,14 @@ WL_DATA_DEVICE_ENTER_EVENT_OPCODE: Event_Opcode : 1
 wl_data_device_enter_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Device_Enter_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_DEVICE_ENTER_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
 	event.surface = message_read_object_id(&reader, Wl_Surface) or_return
 	event.x = message_read_fixed(&reader) or_return
 	event.y = message_read_fixed(&reader) or_return
 	event.id = message_read_object_id(&reader, Wl_Data_Offer) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_device" + "@{}." + "enter" + ":" + " " + "serial" + "={}" + " " + "surface" + "={}" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "id" + "={}", event.target, event.serial, event.surface, event.x, event.y, event.id)
 	return
 }
@@ -1520,14 +1554,9 @@ WL_DATA_DEVICE_LEAVE_EVENT_OPCODE: Event_Opcode : 2
 wl_data_device_leave_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Device_Leave_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_DEVICE_LEAVE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_device" + "@{}." + "leave" + ":", event.target)
 	return
 }
@@ -1551,17 +1580,12 @@ WL_DATA_DEVICE_MOTION_EVENT_OPCODE: Event_Opcode : 3
 wl_data_device_motion_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Device_Motion_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_DEVICE_MOTION_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.time = message_read_u32(&reader) or_return
 	event.x = message_read_fixed(&reader) or_return
 	event.y = message_read_fixed(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_device" + "@{}." + "motion" + ":" + " " + "time" + "={}" + " " + "x" + "={}" + " " + "y" + "={}", event.target, event.time, event.x, event.y)
 	return
 }
@@ -1588,14 +1612,9 @@ WL_DATA_DEVICE_DROP_EVENT_OPCODE: Event_Opcode : 4
 wl_data_device_drop_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Device_Drop_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_DEVICE_DROP_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_device" + "@{}." + "drop" + ":", event.target)
 	return
 }
@@ -1623,15 +1642,10 @@ WL_DATA_DEVICE_SELECTION_EVENT_OPCODE: Event_Opcode : 5
 wl_data_device_selection_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Data_Device_Selection_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_DATA_DEVICE_SELECTION_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.id = message_read_object_id(&reader, Wl_Data_Offer) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_data_device" + "@{}." + "selection" + ":" + " " + "id" + "={}", event.target, event.id)
 	return
 }
@@ -1689,11 +1703,17 @@ WL_DATA_DEVICE_MANAGER_CREATE_DATA_SOURCE_OPCODE: Opcode : 0
 // Create a new data source.
 // - id: data source to create
 wl_data_device_manager_create_data_source :: proc(conn_: ^Connection, target_: Wl_Data_Device_Manager, ) -> (id: Wl_Data_Source, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_DATA_DEVICE_MANAGER_CREATE_DATA_SOURCE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_DEVICE_MANAGER_CREATE_DATA_SOURCE_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
+	message_write(&writer_, id)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_data_device_manager" + "@{}." + "create_data_source" + ":" + " " + "id" + "={}", target_, id)
 	return
 }
@@ -1705,12 +1725,18 @@ WL_DATA_DEVICE_MANAGER_GET_DATA_DEVICE_OPCODE: Opcode : 1
 // - id: data device to create
 // - seat: seat associated with the data device
 wl_data_device_manager_get_data_device :: proc(conn_: ^Connection, target_: Wl_Data_Device_Manager, seat: Wl_Seat, ) -> (id: Wl_Data_Device, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, WL_DATA_DEVICE_MANAGER_GET_DATA_DEVICE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_DATA_DEVICE_MANAGER_GET_DATA_DEVICE_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
-	message_write(writer_, seat) or_return
+	message_write(&writer_, id)
+	message_write(&writer_, seat)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_data_device_manager" + "@{}." + "get_data_device" + ":" + " " + "id" + "={}" + " " + "seat" + "={}", target_, id, seat)
 	return
 }
@@ -1743,12 +1769,18 @@ WL_SHELL_GET_SHELL_SURFACE_OPCODE: Opcode : 0
 // - id: shell surface to create
 // - surface: surface to be given the shell surface role
 wl_shell_get_shell_surface :: proc(conn_: ^Connection, target_: Wl_Shell, surface: Wl_Surface, ) -> (id: Wl_Shell_Surface, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, WL_SHELL_GET_SHELL_SURFACE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_GET_SHELL_SURFACE_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
-	message_write(writer_, surface) or_return
+	message_write(&writer_, id)
+	message_write(&writer_, surface)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell" + "@{}." + "get_shell_surface" + ":" + " " + "id" + "={}" + " " + "surface" + "={}", target_, id, surface)
 	return
 }
@@ -1822,10 +1854,16 @@ WL_SHELL_SURFACE_PONG_OPCODE: Opcode : 0
 // the client may be deemed unresponsive.
 // - serial: serial number of the ping event
 wl_shell_surface_pong :: proc(conn_: ^Connection, target_: Wl_Shell_Surface, serial: u32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SHELL_SURFACE_PONG_OPCODE, msg_size_) or_return
-	message_write(writer_, serial) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_SURFACE_PONG_OPCODE, msg_size_)
+	message_write(&writer_, serial)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell_surface" + "@{}." + "pong" + ":" + " " + "serial" + "={}", target_, serial)
 	return
 }
@@ -1841,11 +1879,17 @@ WL_SHELL_SURFACE_MOVE_OPCODE: Opcode : 1
 // - seat: seat whose pointer is used
 // - serial: serial number of the implicit grab on the pointer
 wl_shell_surface_move :: proc(conn_: ^Connection, target_: Wl_Shell_Surface, seat: Wl_Seat, serial: u32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, WL_SHELL_SURFACE_MOVE_OPCODE, msg_size_) or_return
-	message_write(writer_, seat) or_return
-	message_write(writer_, serial) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_SURFACE_MOVE_OPCODE, msg_size_)
+	message_write(&writer_, seat)
+	message_write(&writer_, serial)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell_surface" + "@{}." + "move" + ":" + " " + "seat" + "={}" + " " + "serial" + "={}", target_, seat, serial)
 	return
 }
@@ -1862,12 +1906,18 @@ WL_SHELL_SURFACE_RESIZE_OPCODE: Opcode : 2
 // - serial: serial number of the implicit grab on the pointer
 // - edges: which edge or corner is being dragged
 wl_shell_surface_resize :: proc(conn_: ^Connection, target_: Wl_Shell_Surface, seat: Wl_Seat, serial: u32, edges: Wl_Shell_Surface_Resize_Enum, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 12
-	message_write_header(writer_, target_, WL_SHELL_SURFACE_RESIZE_OPCODE, msg_size_) or_return
-	message_write(writer_, seat) or_return
-	message_write(writer_, serial) or_return
-	message_write(writer_, edges) or_return
+	msg_size_: u16 = message_header_size + 12
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_SURFACE_RESIZE_OPCODE, msg_size_)
+	message_write(&writer_, seat)
+	message_write(&writer_, serial)
+	message_write(&writer_, edges)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell_surface" + "@{}." + "resize" + ":" + " " + "seat" + "={}" + " " + "serial" + "={}" + " " + "edges" + "={}", target_, seat, serial, edges)
 	return
 }
@@ -1879,9 +1929,15 @@ WL_SHELL_SURFACE_SET_TOPLEVEL_OPCODE: Opcode : 3
 // 
 // A toplevel surface is not fullscreen, maximized or transient.
 wl_shell_surface_set_toplevel :: proc(conn_: ^Connection, target_: Wl_Shell_Surface, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_SHELL_SURFACE_SET_TOPLEVEL_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_SURFACE_SET_TOPLEVEL_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell_surface" + "@{}." + "set_toplevel" + ":", target_)
 	return
 }
@@ -1901,13 +1957,19 @@ WL_SHELL_SURFACE_SET_TRANSIENT_OPCODE: Opcode : 4
 // - y: surface-local y coordinate
 // - flags: transient surface behavior
 wl_shell_surface_set_transient :: proc(conn_: ^Connection, target_: Wl_Shell_Surface, parent: Wl_Surface, x: i32, y: i32, flags: Wl_Shell_Surface_Transient_Enum, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 16
-	message_write_header(writer_, target_, WL_SHELL_SURFACE_SET_TRANSIENT_OPCODE, msg_size_) or_return
-	message_write(writer_, parent) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
-	message_write(writer_, flags) or_return
+	msg_size_: u16 = message_header_size + 16
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_SURFACE_SET_TRANSIENT_OPCODE, msg_size_)
+	message_write(&writer_, parent)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+	message_write(&writer_, flags)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell_surface" + "@{}." + "set_transient" + ":" + " " + "parent" + "={}" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "flags" + "={}", target_, parent, x, y, flags)
 	return
 }
@@ -1952,12 +2014,18 @@ WL_SHELL_SURFACE_SET_FULLSCREEN_OPCODE: Opcode : 5
 // - framerate: framerate in mHz
 // - output: output on which the surface is to be fullscreen
 wl_shell_surface_set_fullscreen :: proc(conn_: ^Connection, target_: Wl_Shell_Surface, method: Wl_Shell_Surface_Fullscreen_Method_Enum, framerate: u32, output: Wl_Output, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 12
-	message_write_header(writer_, target_, WL_SHELL_SURFACE_SET_FULLSCREEN_OPCODE, msg_size_) or_return
-	message_write(writer_, method) or_return
-	message_write(writer_, framerate) or_return
-	message_write(writer_, output) or_return
+	msg_size_: u16 = message_header_size + 12
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_SURFACE_SET_FULLSCREEN_OPCODE, msg_size_)
+	message_write(&writer_, method)
+	message_write(&writer_, framerate)
+	message_write(&writer_, output)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell_surface" + "@{}." + "set_fullscreen" + ":" + " " + "method" + "={}" + " " + "framerate" + "={}" + " " + "output" + "={}", target_, method, framerate, output)
 	return
 }
@@ -1991,15 +2059,21 @@ WL_SHELL_SURFACE_SET_POPUP_OPCODE: Opcode : 6
 // - y: surface-local y coordinate
 // - flags: transient surface behavior
 wl_shell_surface_set_popup :: proc(conn_: ^Connection, target_: Wl_Shell_Surface, seat: Wl_Seat, serial: u32, parent: Wl_Surface, x: i32, y: i32, flags: Wl_Shell_Surface_Transient_Enum, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 24
-	message_write_header(writer_, target_, WL_SHELL_SURFACE_SET_POPUP_OPCODE, msg_size_) or_return
-	message_write(writer_, seat) or_return
-	message_write(writer_, serial) or_return
-	message_write(writer_, parent) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
-	message_write(writer_, flags) or_return
+	msg_size_: u16 = message_header_size + 24
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_SURFACE_SET_POPUP_OPCODE, msg_size_)
+	message_write(&writer_, seat)
+	message_write(&writer_, serial)
+	message_write(&writer_, parent)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+	message_write(&writer_, flags)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell_surface" + "@{}." + "set_popup" + ":" + " " + "seat" + "={}" + " " + "serial" + "={}" + " " + "parent" + "={}" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "flags" + "={}", target_, seat, serial, parent, x, y, flags)
 	return
 }
@@ -2027,10 +2101,16 @@ WL_SHELL_SURFACE_SET_MAXIMIZED_OPCODE: Opcode : 7
 // The details depend on the compositor implementation.
 // - output: output on which the surface is to be maximized
 wl_shell_surface_set_maximized :: proc(conn_: ^Connection, target_: Wl_Shell_Surface, output: Wl_Output, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SHELL_SURFACE_SET_MAXIMIZED_OPCODE, msg_size_) or_return
-	message_write(writer_, output) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_SURFACE_SET_MAXIMIZED_OPCODE, msg_size_)
+	message_write(&writer_, output)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell_surface" + "@{}." + "set_maximized" + ":" + " " + "output" + "={}", target_, output)
 	return
 }
@@ -2047,11 +2127,17 @@ WL_SHELL_SURFACE_SET_TITLE_OPCODE: Opcode : 8
 // The string must be encoded in UTF-8.
 // - title: surface title
 wl_shell_surface_set_title :: proc(conn_: ^Connection, target_: Wl_Shell_Surface, title: string, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
+	msg_size_: u16 = message_header_size + 4
 	msg_size_ += message_string_size(len(title))
-	message_write_header(writer_, target_, WL_SHELL_SURFACE_SET_TITLE_OPCODE, msg_size_) or_return
-	message_write(writer_, title) or_return
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_SURFACE_SET_TITLE_OPCODE, msg_size_)
+	message_write(&writer_, title)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell_surface" + "@{}." + "set_title" + ":" + " " + "title" + "={}", target_, title)
 	return
 }
@@ -2067,11 +2153,17 @@ WL_SHELL_SURFACE_SET_CLASS_OPCODE: Opcode : 9
 // the application's .desktop file as the class.
 // - class_: surface class
 wl_shell_surface_set_class :: proc(conn_: ^Connection, target_: Wl_Shell_Surface, class_: string, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
+	msg_size_: u16 = message_header_size + 4
 	msg_size_ += message_string_size(len(class_))
-	message_write_header(writer_, target_, WL_SHELL_SURFACE_SET_CLASS_OPCODE, msg_size_) or_return
-	message_write(writer_, class_) or_return
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SHELL_SURFACE_SET_CLASS_OPCODE, msg_size_)
+	message_write(&writer_, class_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_shell_surface" + "@{}." + "set_class" + ":" + " " + "class_" + "={}", target_, class_)
 	return
 }
@@ -2089,15 +2181,10 @@ WL_SHELL_SURFACE_PING_EVENT_OPCODE: Event_Opcode : 0
 wl_shell_surface_ping_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Shell_Surface_Ping_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_SHELL_SURFACE_PING_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_shell_surface" + "@{}." + "ping" + ":" + " " + "serial" + "={}", event.target, event.serial)
 	return
 }
@@ -2133,17 +2220,12 @@ WL_SHELL_SURFACE_CONFIGURE_EVENT_OPCODE: Event_Opcode : 1
 wl_shell_surface_configure_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Shell_Surface_Configure_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_SHELL_SURFACE_CONFIGURE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.edges = message_read_enum(&reader, Wl_Shell_Surface_Resize_Enum) or_return
 	event.width = message_read_i32(&reader) or_return
 	event.height = message_read_i32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_shell_surface" + "@{}." + "configure" + ":" + " " + "edges" + "={}" + " " + "width" + "={}" + " " + "height" + "={}", event.target, event.edges, event.width, event.height)
 	return
 }
@@ -2160,14 +2242,9 @@ WL_SHELL_SURFACE_POPUP_DONE_EVENT_OPCODE: Event_Opcode : 2
 wl_shell_surface_popup_done_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Shell_Surface_Popup_Done_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_SHELL_SURFACE_POPUP_DONE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_shell_surface" + "@{}." + "popup_done" + ":", event.target)
 	return
 }
@@ -2238,9 +2315,15 @@ WL_SURFACE_DESTROY_OPCODE: Opcode : 0
 //
 // Deletes the surface and invalidates its object ID.
 wl_surface_destroy :: proc(conn_: ^Connection, target_: Wl_Surface, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_SURFACE_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "destroy" + ":", target_)
 	return
@@ -2310,12 +2393,18 @@ WL_SURFACE_ATTACH_OPCODE: Opcode : 1
 // - x: surface-local x coordinate
 // - y: surface-local y coordinate
 wl_surface_attach :: proc(conn_: ^Connection, target_: Wl_Surface, buffer: Wl_Buffer, x: i32, y: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 12
-	message_write_header(writer_, target_, WL_SURFACE_ATTACH_OPCODE, msg_size_) or_return
-	message_write(writer_, buffer) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
+	msg_size_: u16 = message_header_size + 12
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_ATTACH_OPCODE, msg_size_)
+	message_write(&writer_, buffer)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "attach" + ":" + " " + "buffer" + "={}" + " " + "x" + "={}" + " " + "y" + "={}", target_, buffer, x, y)
 	return
 }
@@ -2349,13 +2438,19 @@ WL_SURFACE_DAMAGE_OPCODE: Opcode : 2
 // - width: width of damage rectangle
 // - height: height of damage rectangle
 wl_surface_damage :: proc(conn_: ^Connection, target_: Wl_Surface, x: i32, y: i32, width: i32, height: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 16
-	message_write_header(writer_, target_, WL_SURFACE_DAMAGE_OPCODE, msg_size_) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
-	message_write(writer_, width) or_return
-	message_write(writer_, height) or_return
+	msg_size_: u16 = message_header_size + 16
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_DAMAGE_OPCODE, msg_size_)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+	message_write(&writer_, width)
+	message_write(&writer_, height)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "damage" + ":" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "width" + "={}" + " " + "height" + "={}", target_, x, y, width, height)
 	return
 }
@@ -2397,11 +2492,17 @@ WL_SURFACE_FRAME_OPCODE: Opcode : 3
 // milliseconds, with an undefined base.
 // - callback: callback object for the frame request
 wl_surface_frame :: proc(conn_: ^Connection, target_: Wl_Surface, ) -> (callback: Wl_Callback, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SURFACE_FRAME_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_FRAME_OPCODE, msg_size_)
 	callback = connection_alloc_id(conn_) or_return
-	message_write(writer_, callback) or_return
+	message_write(&writer_, callback)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "frame" + ":" + " " + "callback" + "={}", target_, callback)
 	return
 }
@@ -2435,10 +2536,16 @@ WL_SURFACE_SET_OPAQUE_REGION_OPCODE: Opcode : 4
 // region to be set to empty.
 // - region: opaque region of the surface
 wl_surface_set_opaque_region :: proc(conn_: ^Connection, target_: Wl_Surface, region: Wl_Region, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SURFACE_SET_OPAQUE_REGION_OPCODE, msg_size_) or_return
-	message_write(writer_, region) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_SET_OPAQUE_REGION_OPCODE, msg_size_)
+	message_write(&writer_, region)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "set_opaque_region" + ":" + " " + "region" + "={}", target_, region)
 	return
 }
@@ -2470,10 +2577,16 @@ WL_SURFACE_SET_INPUT_REGION_OPCODE: Opcode : 5
 // to infinite.
 // - region: input region of the surface
 wl_surface_set_input_region :: proc(conn_: ^Connection, target_: Wl_Surface, region: Wl_Region, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SURFACE_SET_INPUT_REGION_OPCODE, msg_size_) or_return
-	message_write(writer_, region) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_SET_INPUT_REGION_OPCODE, msg_size_)
+	message_write(&writer_, region)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "set_input_region" + ":" + " " + "region" + "={}", target_, region)
 	return
 }
@@ -2499,9 +2612,15 @@ WL_SURFACE_COMMIT_OPCODE: Opcode : 6
 // 
 // Other interfaces may add further double-buffered surface state.
 wl_surface_commit :: proc(conn_: ^Connection, target_: Wl_Surface, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_SURFACE_COMMIT_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_COMMIT_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "commit" + ":", target_)
 	return
 }
@@ -2540,10 +2659,16 @@ WL_SURFACE_SET_BUFFER_TRANSFORM_OPCODE: Opcode : 7
 // is raised.
 // - transform: transform for interpreting buffer contents
 wl_surface_set_buffer_transform :: proc(conn_: ^Connection, target_: Wl_Surface, transform: Wl_Output_Transform_Enum, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SURFACE_SET_BUFFER_TRANSFORM_OPCODE, msg_size_) or_return
-	message_write(writer_, transform) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_SET_BUFFER_TRANSFORM_OPCODE, msg_size_)
+	message_write(&writer_, transform)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "set_buffer_transform" + ":" + " " + "transform" + "={}", target_, transform)
 	return
 }
@@ -2576,10 +2701,16 @@ WL_SURFACE_SET_BUFFER_SCALE_OPCODE: Opcode : 8
 // raised.
 // - scale: positive scale for interpreting buffer contents
 wl_surface_set_buffer_scale :: proc(conn_: ^Connection, target_: Wl_Surface, scale: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SURFACE_SET_BUFFER_SCALE_OPCODE, msg_size_) or_return
-	message_write(writer_, scale) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_SET_BUFFER_SCALE_OPCODE, msg_size_)
+	message_write(&writer_, scale)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "set_buffer_scale" + ":" + " " + "scale" + "={}", target_, scale)
 	return
 }
@@ -2624,13 +2755,19 @@ WL_SURFACE_DAMAGE_BUFFER_OPCODE: Opcode : 9
 // - width: width of damage rectangle
 // - height: height of damage rectangle
 wl_surface_damage_buffer :: proc(conn_: ^Connection, target_: Wl_Surface, x: i32, y: i32, width: i32, height: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 16
-	message_write_header(writer_, target_, WL_SURFACE_DAMAGE_BUFFER_OPCODE, msg_size_) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
-	message_write(writer_, width) or_return
-	message_write(writer_, height) or_return
+	msg_size_: u16 = message_header_size + 16
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_DAMAGE_BUFFER_OPCODE, msg_size_)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+	message_write(&writer_, width)
+	message_write(&writer_, height)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "damage_buffer" + ":" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "width" + "={}" + " " + "height" + "={}", target_, x, y, width, height)
 	return
 }
@@ -2653,11 +2790,17 @@ WL_SURFACE_OFFSET_OPCODE: Opcode : 10
 // - x: surface-local x coordinate
 // - y: surface-local y coordinate
 wl_surface_offset :: proc(conn_: ^Connection, target_: Wl_Surface, x: i32, y: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, WL_SURFACE_OFFSET_OPCODE, msg_size_) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SURFACE_OFFSET_OPCODE, msg_size_)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_surface" + "@{}." + "offset" + ":" + " " + "x" + "={}" + " " + "y" + "={}", target_, x, y)
 	return
 }
@@ -2678,15 +2821,10 @@ WL_SURFACE_ENTER_EVENT_OPCODE: Event_Opcode : 0
 wl_surface_enter_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Surface_Enter_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_SURFACE_ENTER_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.output = message_read_object_id(&reader, Wl_Output) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_surface" + "@{}." + "enter" + ":" + " " + "output" + "={}", event.target, event.output)
 	return
 }
@@ -2711,15 +2849,10 @@ WL_SURFACE_LEAVE_EVENT_OPCODE: Event_Opcode : 1
 wl_surface_leave_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Surface_Leave_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_SURFACE_LEAVE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.output = message_read_object_id(&reader, Wl_Output) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_surface" + "@{}." + "leave" + ":" + " " + "output" + "={}", event.target, event.output)
 	return
 }
@@ -2742,15 +2875,10 @@ WL_SURFACE_PREFERRED_BUFFER_SCALE_EVENT_OPCODE: Event_Opcode : 2
 wl_surface_preferred_buffer_scale_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Surface_Preferred_Buffer_Scale_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_SURFACE_PREFERRED_BUFFER_SCALE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.factor = message_read_i32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_surface" + "@{}." + "preferred_buffer_scale" + ":" + " " + "factor" + "={}", event.target, event.factor)
 	return
 }
@@ -2771,15 +2899,10 @@ WL_SURFACE_PREFERRED_BUFFER_TRANSFORM_EVENT_OPCODE: Event_Opcode : 3
 wl_surface_preferred_buffer_transform_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Surface_Preferred_Buffer_Transform_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_SURFACE_PREFERRED_BUFFER_TRANSFORM_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.transform = message_read_enum(&reader, Wl_Output_Transform_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_surface" + "@{}." + "preferred_buffer_transform" + ":" + " " + "transform" + "={}", event.target, event.transform)
 	return
 }
@@ -2824,11 +2947,17 @@ WL_SEAT_GET_POINTER_OPCODE: Opcode : 0
 // be sent in this case.
 // - id: seat pointer
 wl_seat_get_pointer :: proc(conn_: ^Connection, target_: Wl_Seat, ) -> (id: Wl_Pointer, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SEAT_GET_POINTER_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SEAT_GET_POINTER_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
+	message_write(&writer_, id)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_seat" + "@{}." + "get_pointer" + ":" + " " + "id" + "={}", target_, id)
 	return
 }
@@ -2846,11 +2975,17 @@ WL_SEAT_GET_KEYBOARD_OPCODE: Opcode : 1
 // be sent in this case.
 // - id: seat keyboard
 wl_seat_get_keyboard :: proc(conn_: ^Connection, target_: Wl_Seat, ) -> (id: Wl_Keyboard, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SEAT_GET_KEYBOARD_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SEAT_GET_KEYBOARD_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
+	message_write(&writer_, id)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_seat" + "@{}." + "get_keyboard" + ":" + " " + "id" + "={}", target_, id)
 	return
 }
@@ -2868,11 +3003,17 @@ WL_SEAT_GET_TOUCH_OPCODE: Opcode : 2
 // be sent in this case.
 // - id: seat touch interface
 wl_seat_get_touch :: proc(conn_: ^Connection, target_: Wl_Seat, ) -> (id: Wl_Touch, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SEAT_GET_TOUCH_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SEAT_GET_TOUCH_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
+	message_write(&writer_, id)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_seat" + "@{}." + "get_touch" + ":" + " " + "id" + "={}", target_, id)
 	return
 }
@@ -2883,9 +3024,15 @@ WL_SEAT_RELEASE_OPCODE: Opcode : 3
 // Using this request a client can tell the server that it is not going to
 // use the seat object anymore.
 wl_seat_release :: proc(conn_: ^Connection, target_: Wl_Seat, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_SEAT_RELEASE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SEAT_RELEASE_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_seat" + "@{}." + "release" + ":", target_)
 	return
@@ -2925,15 +3072,10 @@ WL_SEAT_CAPABILITIES_EVENT_OPCODE: Event_Opcode : 0
 wl_seat_capabilities_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Seat_Capabilities_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_SEAT_CAPABILITIES_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.capabilities = message_read_enum(&reader, Wl_Seat_Capability_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_seat" + "@{}." + "capabilities" + ":" + " " + "capabilities" + "={}", event.target, event.capabilities)
 	return
 }
@@ -2965,15 +3107,10 @@ WL_SEAT_NAME_EVENT_OPCODE: Event_Opcode : 1
 wl_seat_name_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Seat_Name_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_SEAT_NAME_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.name = message_read_string(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_seat" + "@{}." + "name" + ":" + " " + "name" + "={}", event.target, event.name)
 	return
 }
@@ -3092,13 +3229,19 @@ WL_POINTER_SET_CURSOR_OPCODE: Opcode : 0
 // - hotspot_x: surface-local x coordinate
 // - hotspot_y: surface-local y coordinate
 wl_pointer_set_cursor :: proc(conn_: ^Connection, target_: Wl_Pointer, serial: u32, surface: Wl_Surface, hotspot_x: i32, hotspot_y: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 16
-	message_write_header(writer_, target_, WL_POINTER_SET_CURSOR_OPCODE, msg_size_) or_return
-	message_write(writer_, serial) or_return
-	message_write(writer_, surface) or_return
-	message_write(writer_, hotspot_x) or_return
-	message_write(writer_, hotspot_y) or_return
+	msg_size_: u16 = message_header_size + 16
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_POINTER_SET_CURSOR_OPCODE, msg_size_)
+	message_write(&writer_, serial)
+	message_write(&writer_, surface)
+	message_write(&writer_, hotspot_x)
+	message_write(&writer_, hotspot_y)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_pointer" + "@{}." + "set_cursor" + ":" + " " + "serial" + "={}" + " " + "surface" + "={}" + " " + "hotspot_x" + "={}" + " " + "hotspot_y" + "={}", target_, serial, surface, hotspot_x, hotspot_y)
 	return
 }
@@ -3112,9 +3255,15 @@ WL_POINTER_RELEASE_OPCODE: Opcode : 1
 // This request destroys the pointer proxy object, so clients must not call
 // wl_pointer_destroy() after using this request.
 wl_pointer_release :: proc(conn_: ^Connection, target_: Wl_Pointer, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_POINTER_RELEASE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_POINTER_RELEASE_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_pointer" + "@{}." + "release" + ":", target_)
 	return
@@ -3143,18 +3292,13 @@ WL_POINTER_ENTER_EVENT_OPCODE: Event_Opcode : 0
 wl_pointer_enter_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Enter_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_ENTER_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
 	event.surface = message_read_object_id(&reader, Wl_Surface) or_return
 	event.surface_x = message_read_fixed(&reader) or_return
 	event.surface_y = message_read_fixed(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "enter" + ":" + " " + "serial" + "={}" + " " + "surface" + "={}" + " " + "surface_x" + "={}" + " " + "surface_y" + "={}", event.target, event.serial, event.surface, event.surface_x, event.surface_y)
 	return
 }
@@ -3177,16 +3321,11 @@ WL_POINTER_LEAVE_EVENT_OPCODE: Event_Opcode : 1
 wl_pointer_leave_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Leave_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_LEAVE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
 	event.surface = message_read_object_id(&reader, Wl_Surface) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "leave" + ":" + " " + "serial" + "={}" + " " + "surface" + "={}", event.target, event.serial, event.surface)
 	return
 }
@@ -3209,17 +3348,12 @@ WL_POINTER_MOTION_EVENT_OPCODE: Event_Opcode : 2
 wl_pointer_motion_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Motion_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_MOTION_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.time = message_read_u32(&reader) or_return
 	event.surface_x = message_read_fixed(&reader) or_return
 	event.surface_y = message_read_fixed(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "motion" + ":" + " " + "time" + "={}" + " " + "surface_x" + "={}" + " " + "surface_y" + "={}", event.target, event.time, event.surface_x, event.surface_y)
 	return
 }
@@ -3254,18 +3388,13 @@ WL_POINTER_BUTTON_EVENT_OPCODE: Event_Opcode : 3
 wl_pointer_button_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Button_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_BUTTON_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
 	event.time = message_read_u32(&reader) or_return
 	event.button = message_read_u32(&reader) or_return
 	event.state = message_read_enum(&reader, Wl_Pointer_Button_State_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "button" + ":" + " " + "serial" + "={}" + " " + "time" + "={}" + " " + "button" + "={}" + " " + "state" + "={}", event.target, event.serial, event.time, event.button, event.state)
 	return
 }
@@ -3300,17 +3429,12 @@ WL_POINTER_AXIS_EVENT_OPCODE: Event_Opcode : 4
 wl_pointer_axis_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Axis_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_AXIS_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.time = message_read_u32(&reader) or_return
 	event.axis = message_read_enum(&reader, Wl_Pointer_Axis_Enum) or_return
 	event.value = message_read_fixed(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "axis" + ":" + " " + "time" + "={}" + " " + "axis" + "={}" + " " + "value" + "={}", event.target, event.time, event.axis, event.value)
 	return
 }
@@ -3358,14 +3482,9 @@ WL_POINTER_FRAME_EVENT_OPCODE: Event_Opcode : 5
 wl_pointer_frame_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Frame_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_FRAME_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "frame" + ":", event.target)
 	return
 }
@@ -3405,15 +3524,10 @@ WL_POINTER_AXIS_SOURCE_EVENT_OPCODE: Event_Opcode : 6
 wl_pointer_axis_source_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Axis_Source_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_AXIS_SOURCE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.axis_source = message_read_enum(&reader, Wl_Pointer_Axis_Source_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "axis_source" + ":" + " " + "axis_source" + "={}", event.target, event.axis_source)
 	return
 }
@@ -3444,16 +3558,11 @@ WL_POINTER_AXIS_STOP_EVENT_OPCODE: Event_Opcode : 7
 wl_pointer_axis_stop_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Axis_Stop_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_AXIS_STOP_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.time = message_read_u32(&reader) or_return
 	event.axis = message_read_enum(&reader, Wl_Pointer_Axis_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "axis_stop" + ":" + " " + "time" + "={}" + " " + "axis" + "={}", event.target, event.time, event.axis)
 	return
 }
@@ -3500,16 +3609,11 @@ WL_POINTER_AXIS_DISCRETE_EVENT_OPCODE: Event_Opcode : 8
 wl_pointer_axis_discrete_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Axis_Discrete_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_AXIS_DISCRETE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.axis = message_read_enum(&reader, Wl_Pointer_Axis_Enum) or_return
 	event.discrete = message_read_i32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "axis_discrete" + ":" + " " + "axis" + "={}" + " " + "discrete" + "={}", event.target, event.axis, event.discrete)
 	return
 }
@@ -3547,16 +3651,11 @@ WL_POINTER_AXIS_VALUE120_EVENT_OPCODE: Event_Opcode : 9
 wl_pointer_axis_value120_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Axis_Value120_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_AXIS_VALUE120_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.axis = message_read_enum(&reader, Wl_Pointer_Axis_Enum) or_return
 	event.value120 = message_read_i32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "axis_value120" + ":" + " " + "axis" + "={}" + " " + "value120" + "={}", event.target, event.axis, event.value120)
 	return
 }
@@ -3607,16 +3706,11 @@ WL_POINTER_AXIS_RELATIVE_DIRECTION_EVENT_OPCODE: Event_Opcode : 10
 wl_pointer_axis_relative_direction_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Pointer_Axis_Relative_Direction_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_POINTER_AXIS_RELATIVE_DIRECTION_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.axis = message_read_enum(&reader, Wl_Pointer_Axis_Enum) or_return
 	event.direction = message_read_enum(&reader, Wl_Pointer_Axis_Relative_Direction_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_pointer" + "@{}." + "axis_relative_direction" + ":" + " " + "axis" + "={}" + " " + "direction" + "={}", event.target, event.axis, event.direction)
 	return
 }
@@ -3649,9 +3743,15 @@ Wl_Keyboard_Key_State_Enum :: enum u32 {
 WL_KEYBOARD_RELEASE_OPCODE: Opcode : 0
 // release the keyboard object
 wl_keyboard_release :: proc(conn_: ^Connection, target_: Wl_Keyboard, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_KEYBOARD_RELEASE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_KEYBOARD_RELEASE_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_keyboard" + "@{}." + "release" + ":", target_)
 	return
@@ -3677,17 +3777,12 @@ WL_KEYBOARD_KEYMAP_EVENT_OPCODE: Event_Opcode : 0
 wl_keyboard_keymap_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Keyboard_Keymap_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_KEYBOARD_KEYMAP_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.format = message_read_enum(&reader, Wl_Keyboard_Keymap_Format_Enum) or_return
 	event.fd = connection_read_fd(conn) or_return
 	event.size = message_read_u32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_keyboard" + "@{}." + "keymap" + ":" + " " + "format" + "={}" + " " + "fd" + "={}" + " " + "size" + "={}", event.target, event.format, event.fd, event.size)
 	return
 }
@@ -3712,17 +3807,12 @@ WL_KEYBOARD_ENTER_EVENT_OPCODE: Event_Opcode : 1
 wl_keyboard_enter_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Keyboard_Enter_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_KEYBOARD_ENTER_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
 	event.surface = message_read_object_id(&reader, Wl_Surface) or_return
 	event.keys = message_read_array(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_keyboard" + "@{}." + "enter" + ":" + " " + "serial" + "={}" + " " + "surface" + "={}" + " " + "keys" + "={}", event.target, event.serial, event.surface, event.keys)
 	return
 }
@@ -3748,16 +3838,11 @@ WL_KEYBOARD_LEAVE_EVENT_OPCODE: Event_Opcode : 2
 wl_keyboard_leave_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Keyboard_Leave_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_KEYBOARD_LEAVE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
 	event.surface = message_read_object_id(&reader, Wl_Surface) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_keyboard" + "@{}." + "leave" + ":" + " " + "serial" + "={}" + " " + "surface" + "={}", event.target, event.serial, event.surface)
 	return
 }
@@ -3787,18 +3872,13 @@ WL_KEYBOARD_KEY_EVENT_OPCODE: Event_Opcode : 3
 wl_keyboard_key_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Keyboard_Key_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_KEYBOARD_KEY_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
 	event.time = message_read_u32(&reader) or_return
 	event.key = message_read_u32(&reader) or_return
 	event.state = message_read_enum(&reader, Wl_Keyboard_Key_State_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_keyboard" + "@{}." + "key" + ":" + " " + "serial" + "={}" + " " + "time" + "={}" + " " + "key" + "={}" + " " + "state" + "={}", event.target, event.serial, event.time, event.key, event.state)
 	return
 }
@@ -3824,19 +3904,14 @@ WL_KEYBOARD_MODIFIERS_EVENT_OPCODE: Event_Opcode : 4
 wl_keyboard_modifiers_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Keyboard_Modifiers_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_KEYBOARD_MODIFIERS_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
 	event.mods_depressed = message_read_u32(&reader) or_return
 	event.mods_latched = message_read_u32(&reader) or_return
 	event.mods_locked = message_read_u32(&reader) or_return
 	event.group = message_read_u32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_keyboard" + "@{}." + "modifiers" + ":" + " " + "serial" + "={}" + " " + "mods_depressed" + "={}" + " " + "mods_latched" + "={}" + " " + "mods_locked" + "={}" + " " + "group" + "={}", event.target, event.serial, event.mods_depressed, event.mods_latched, event.mods_locked, event.group)
 	return
 }
@@ -3866,16 +3941,11 @@ WL_KEYBOARD_REPEAT_INFO_EVENT_OPCODE: Event_Opcode : 5
 wl_keyboard_repeat_info_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Keyboard_Repeat_Info_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_KEYBOARD_REPEAT_INFO_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.rate = message_read_i32(&reader) or_return
 	event.delay = message_read_i32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_keyboard" + "@{}." + "repeat_info" + ":" + " " + "rate" + "={}" + " " + "delay" + "={}", event.target, event.rate, event.delay)
 	return
 }
@@ -3895,9 +3965,15 @@ Wl_Touch :: Object_Id
 WL_TOUCH_RELEASE_OPCODE: Opcode : 0
 // release the touch object
 wl_touch_release :: proc(conn_: ^Connection, target_: Wl_Touch, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_TOUCH_RELEASE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_TOUCH_RELEASE_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_touch" + "@{}." + "release" + ":", target_)
 	return
@@ -3928,8 +4004,7 @@ WL_TOUCH_DOWN_EVENT_OPCODE: Event_Opcode : 0
 wl_touch_down_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Touch_Down_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_TOUCH_DOWN_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
 	event.time = message_read_u32(&reader) or_return
@@ -3937,11 +4012,7 @@ wl_touch_down_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_T
 	event.id = message_read_i32(&reader) or_return
 	event.x = message_read_fixed(&reader) or_return
 	event.y = message_read_fixed(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_touch" + "@{}." + "down" + ":" + " " + "serial" + "={}" + " " + "time" + "={}" + " " + "surface" + "={}" + " " + "id" + "={}" + " " + "x" + "={}" + " " + "y" + "={}", event.target, event.serial, event.time, event.surface, event.id, event.x, event.y)
 	return
 }
@@ -3964,17 +4035,12 @@ WL_TOUCH_UP_EVENT_OPCODE: Event_Opcode : 1
 wl_touch_up_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Touch_Up_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_TOUCH_UP_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
 	event.time = message_read_u32(&reader) or_return
 	event.id = message_read_i32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_touch" + "@{}." + "up" + ":" + " " + "serial" + "={}" + " " + "time" + "={}" + " " + "id" + "={}", event.target, event.serial, event.time, event.id)
 	return
 }
@@ -3997,18 +4063,13 @@ WL_TOUCH_MOTION_EVENT_OPCODE: Event_Opcode : 2
 wl_touch_motion_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Touch_Motion_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_TOUCH_MOTION_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.time = message_read_u32(&reader) or_return
 	event.id = message_read_i32(&reader) or_return
 	event.x = message_read_fixed(&reader) or_return
 	event.y = message_read_fixed(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_touch" + "@{}." + "motion" + ":" + " " + "time" + "={}" + " " + "id" + "={}" + " " + "x" + "={}" + " " + "y" + "={}", event.target, event.time, event.id, event.x, event.y)
 	return
 }
@@ -4030,14 +4091,9 @@ WL_TOUCH_FRAME_EVENT_OPCODE: Event_Opcode : 3
 wl_touch_frame_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Touch_Frame_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_TOUCH_FRAME_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_touch" + "@{}." + "frame" + ":", event.target)
 	return
 }
@@ -4057,14 +4113,9 @@ WL_TOUCH_CANCEL_EVENT_OPCODE: Event_Opcode : 4
 wl_touch_cancel_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Touch_Cancel_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_TOUCH_CANCEL_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_touch" + "@{}." + "cancel" + ":", event.target)
 	return
 }
@@ -4109,17 +4160,12 @@ WL_TOUCH_SHAPE_EVENT_OPCODE: Event_Opcode : 5
 wl_touch_shape_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Touch_Shape_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_TOUCH_SHAPE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.id = message_read_i32(&reader) or_return
 	event.major = message_read_fixed(&reader) or_return
 	event.minor = message_read_fixed(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_touch" + "@{}." + "shape" + ":" + " " + "id" + "={}" + " " + "major" + "={}" + " " + "minor" + "={}", event.target, event.id, event.major, event.minor)
 	return
 }
@@ -4160,16 +4206,11 @@ WL_TOUCH_ORIENTATION_EVENT_OPCODE: Event_Opcode : 6
 wl_touch_orientation_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Touch_Orientation_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_TOUCH_ORIENTATION_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.id = message_read_i32(&reader) or_return
 	event.orientation = message_read_fixed(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_touch" + "@{}." + "orientation" + ":" + " " + "id" + "={}" + " " + "orientation" + "={}", event.target, event.id, event.orientation)
 	return
 }
@@ -4249,9 +4290,15 @@ WL_OUTPUT_RELEASE_OPCODE: Opcode : 0
 // Using this request a client can tell the server that it is not going to
 // use the output object anymore.
 wl_output_release :: proc(conn_: ^Connection, target_: Wl_Output, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_OUTPUT_RELEASE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_OUTPUT_RELEASE_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_output" + "@{}." + "release" + ":", target_)
 	return
@@ -4296,8 +4343,7 @@ WL_OUTPUT_GEOMETRY_EVENT_OPCODE: Event_Opcode : 0
 wl_output_geometry_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Output_Geometry_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_OUTPUT_GEOMETRY_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.x = message_read_i32(&reader) or_return
 	event.y = message_read_i32(&reader) or_return
@@ -4307,11 +4353,7 @@ wl_output_geometry_parse :: proc(conn: ^Connection, message: Message) -> (event:
 	event.make = message_read_string(&reader) or_return
 	event.model = message_read_string(&reader) or_return
 	event.transform = message_read_enum(&reader, Wl_Output_Transform_Enum) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_output" + "@{}." + "geometry" + ":" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "physical_width" + "={}" + " " + "physical_height" + "={}" + " " + "subpixel" + "={}" + " " + "make" + "={}" + " " + "model" + "={}" + " " + "transform" + "={}", event.target, event.x, event.y, event.physical_width, event.physical_height, event.subpixel, event.make, event.model, event.transform)
 	return
 }
@@ -4365,18 +4407,13 @@ WL_OUTPUT_MODE_EVENT_OPCODE: Event_Opcode : 1
 wl_output_mode_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Output_Mode_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_OUTPUT_MODE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.flags = message_read_enum(&reader, Wl_Output_Mode_Enum) or_return
 	event.width = message_read_i32(&reader) or_return
 	event.height = message_read_i32(&reader) or_return
 	event.refresh = message_read_i32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_output" + "@{}." + "mode" + ":" + " " + "flags" + "={}" + " " + "width" + "={}" + " " + "height" + "={}" + " " + "refresh" + "={}", event.target, event.flags, event.width, event.height, event.refresh)
 	return
 }
@@ -4395,14 +4432,9 @@ WL_OUTPUT_DONE_EVENT_OPCODE: Event_Opcode : 2
 wl_output_done_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Output_Done_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_OUTPUT_DONE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_output" + "@{}." + "done" + ":", event.target)
 	return
 }
@@ -4438,15 +4470,10 @@ WL_OUTPUT_SCALE_EVENT_OPCODE: Event_Opcode : 3
 wl_output_scale_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Output_Scale_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_OUTPUT_SCALE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.factor = message_read_i32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_output" + "@{}." + "scale" + ":" + " " + "factor" + "={}", event.target, event.factor)
 	return
 }
@@ -4490,15 +4517,10 @@ WL_OUTPUT_NAME_EVENT_OPCODE: Event_Opcode : 4
 wl_output_name_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Output_Name_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_OUTPUT_NAME_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.name = message_read_string(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_output" + "@{}." + "name" + ":" + " " + "name" + "={}", event.target, event.name)
 	return
 }
@@ -4528,15 +4550,10 @@ WL_OUTPUT_DESCRIPTION_EVENT_OPCODE: Event_Opcode : 5
 wl_output_description_parse :: proc(conn: ^Connection, message: Message) -> (event: Wl_Output_Description_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == WL_OUTPUT_DESCRIPTION_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.description = message_read_string(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "wl_output" + "@{}." + "description" + ":" + " " + "description" + "={}", event.target, event.description)
 	return
 }
@@ -4554,9 +4571,15 @@ WL_REGION_DESTROY_OPCODE: Opcode : 0
 //
 // Destroy the region.  This will invalidate the object ID.
 wl_region_destroy :: proc(conn_: ^Connection, target_: Wl_Region, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_REGION_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_REGION_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_region" + "@{}." + "destroy" + ":", target_)
 	return
@@ -4571,13 +4594,19 @@ WL_REGION_ADD_OPCODE: Opcode : 1
 // - width: rectangle width
 // - height: rectangle height
 wl_region_add :: proc(conn_: ^Connection, target_: Wl_Region, x: i32, y: i32, width: i32, height: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 16
-	message_write_header(writer_, target_, WL_REGION_ADD_OPCODE, msg_size_) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
-	message_write(writer_, width) or_return
-	message_write(writer_, height) or_return
+	msg_size_: u16 = message_header_size + 16
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_REGION_ADD_OPCODE, msg_size_)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+	message_write(&writer_, width)
+	message_write(&writer_, height)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_region" + "@{}." + "add" + ":" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "width" + "={}" + " " + "height" + "={}", target_, x, y, width, height)
 	return
 }
@@ -4591,13 +4620,19 @@ WL_REGION_SUBTRACT_OPCODE: Opcode : 2
 // - width: rectangle width
 // - height: rectangle height
 wl_region_subtract :: proc(conn_: ^Connection, target_: Wl_Region, x: i32, y: i32, width: i32, height: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 16
-	message_write_header(writer_, target_, WL_REGION_SUBTRACT_OPCODE, msg_size_) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
-	message_write(writer_, width) or_return
-	message_write(writer_, height) or_return
+	msg_size_: u16 = message_header_size + 16
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_REGION_SUBTRACT_OPCODE, msg_size_)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+	message_write(&writer_, width)
+	message_write(&writer_, height)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_region" + "@{}." + "subtract" + ":" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "width" + "={}" + " " + "height" + "={}", target_, x, y, width, height)
 	return
 }
@@ -4638,9 +4673,15 @@ WL_SUBCOMPOSITOR_DESTROY_OPCODE: Opcode : 0
 // protocol object anymore. This does not affect any other
 // objects, wl_subsurface objects included.
 wl_subcompositor_destroy :: proc(conn_: ^Connection, target_: Wl_Subcompositor, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_SUBCOMPOSITOR_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SUBCOMPOSITOR_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_subcompositor" + "@{}." + "destroy" + ":", target_)
 	return
@@ -4672,13 +4713,19 @@ WL_SUBCOMPOSITOR_GET_SUBSURFACE_OPCODE: Opcode : 1
 // - surface: the surface to be turned into a sub-surface
 // - parent: the parent surface
 wl_subcompositor_get_subsurface :: proc(conn_: ^Connection, target_: Wl_Subcompositor, surface: Wl_Surface, parent: Wl_Surface, ) -> (id: Wl_Subsurface, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 12
-	message_write_header(writer_, target_, WL_SUBCOMPOSITOR_GET_SUBSURFACE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 12
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SUBCOMPOSITOR_GET_SUBSURFACE_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
-	message_write(writer_, surface) or_return
-	message_write(writer_, parent) or_return
+	message_write(&writer_, id)
+	message_write(&writer_, surface)
+	message_write(&writer_, parent)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_subcompositor" + "@{}." + "get_subsurface" + ":" + " " + "id" + "={}" + " " + "surface" + "={}" + " " + "parent" + "={}", target_, id, surface, parent)
 	return
 }
@@ -4746,9 +4793,15 @@ WL_SUBSURFACE_DESTROY_OPCODE: Opcode : 0
 // wl_subcompositor.get_subsurface request. The wl_surface's association
 // to the parent is deleted. The wl_surface is unmapped immediately.
 wl_subsurface_destroy :: proc(conn_: ^Connection, target_: Wl_Subsurface, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_SUBSURFACE_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SUBSURFACE_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "wl_subsurface" + "@{}." + "destroy" + ":", target_)
 	return
@@ -4776,11 +4829,17 @@ WL_SUBSURFACE_SET_POSITION_OPCODE: Opcode : 1
 // - x: x coordinate in the parent surface
 // - y: y coordinate in the parent surface
 wl_subsurface_set_position :: proc(conn_: ^Connection, target_: Wl_Subsurface, x: i32, y: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, WL_SUBSURFACE_SET_POSITION_OPCODE, msg_size_) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SUBSURFACE_SET_POSITION_OPCODE, msg_size_)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_subsurface" + "@{}." + "set_position" + ":" + " " + "x" + "={}" + " " + "y" + "={}", target_, x, y)
 	return
 }
@@ -4805,10 +4864,16 @@ WL_SUBSURFACE_PLACE_ABOVE_OPCODE: Opcode : 2
 // of its siblings and parent.
 // - sibling: the reference surface
 wl_subsurface_place_above :: proc(conn_: ^Connection, target_: Wl_Subsurface, sibling: Wl_Surface, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SUBSURFACE_PLACE_ABOVE_OPCODE, msg_size_) or_return
-	message_write(writer_, sibling) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SUBSURFACE_PLACE_ABOVE_OPCODE, msg_size_)
+	message_write(&writer_, sibling)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_subsurface" + "@{}." + "place_above" + ":" + " " + "sibling" + "={}", target_, sibling)
 	return
 }
@@ -4820,10 +4885,16 @@ WL_SUBSURFACE_PLACE_BELOW_OPCODE: Opcode : 3
 // See wl_subsurface.place_above.
 // - sibling: the reference surface
 wl_subsurface_place_below :: proc(conn_: ^Connection, target_: Wl_Subsurface, sibling: Wl_Surface, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, WL_SUBSURFACE_PLACE_BELOW_OPCODE, msg_size_) or_return
-	message_write(writer_, sibling) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SUBSURFACE_PLACE_BELOW_OPCODE, msg_size_)
+	message_write(&writer_, sibling)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_subsurface" + "@{}." + "place_below" + ":" + " " + "sibling" + "={}", target_, sibling)
 	return
 }
@@ -4845,9 +4916,15 @@ WL_SUBSURFACE_SET_SYNC_OPCODE: Opcode : 4
 // 
 // See wl_subsurface for the recursive effect of this mode.
 wl_subsurface_set_sync :: proc(conn_: ^Connection, target_: Wl_Subsurface, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_SUBSURFACE_SET_SYNC_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SUBSURFACE_SET_SYNC_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_subsurface" + "@{}." + "set_sync" + ":", target_)
 	return
 }
@@ -4875,9 +4952,15 @@ WL_SUBSURFACE_SET_DESYNC_OPCODE: Opcode : 5
 // If a surface's parent surface behaves as desynchronized, then
 // the cached state is applied on set_desync.
 wl_subsurface_set_desync :: proc(conn_: ^Connection, target_: Wl_Subsurface, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, WL_SUBSURFACE_SET_DESYNC_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, WL_SUBSURFACE_SET_DESYNC_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "wl_subsurface" + "@{}." + "set_desync" + ":", target_)
 	return
 }

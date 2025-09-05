@@ -43,17 +43,12 @@ generate :: proc(filename: string, proto: Protocol) -> Generate_Error {
 		fmt.wprintln(w, "//", strings.trim_left_space(line))
 	}
 
-	fmt.wprintln(
-		w,
-		`
+	fmt.wprintln(w, `
 package wayland
 
-import "core:bytes"
-import "core:io"
 import "core:log"
 import "core:sys/posix"
-`,
-	)
+`)
 
 	for iface in proto.interfaces {
 		codegen_interface(w, iface)
@@ -205,8 +200,7 @@ codegen_request :: proc(
 
 	fmt.wprintfln(
 		w,
-		`{}_{} :: proc(conn_: ^Connection, target_: {}, {}) -> ({}err_: Conn_Error) {{
-	writer_ := connection_writer(conn_)`,
+		`{}_{} :: proc(conn_: ^Connection, target_: {}, {}) -> ({}err_: Conn_Error) {{`,
 		interface.name_snake,
 		req.name,
 		interface.name_ada,
@@ -219,13 +213,8 @@ codegen_request :: proc(
 		switch arg_type in arg.type {
 		case Primitive_Type:
 			switch arg_type {
-			case .Int:
-				static_size += size_of(i32)
-			case .Uint:
+			case .Int, .Uint, .Fixed, .String, .Array:
 				static_size += size_of(u32)
-			case .Fixed:
-				static_size += size_of(u32)
-			case .String, .Array: // runtime-known
 			case .Fd: // not included
 			}
 		case Object_Type:
@@ -236,7 +225,7 @@ codegen_request :: proc(
 	}
 
 	// TODO: Check size bounds?
-	fmt.wprintfln(w, "\tmsg_size_ :u16 = message_header_size + {}", static_size)
+	fmt.wprintfln(w, "\tmsg_size_: u16 = message_header_size + {}", static_size)
 	// Add in dynamic size
 	for arg in req.args {
 		#partial switch arg_type in arg.type {
@@ -252,7 +241,11 @@ codegen_request :: proc(
 
 	fmt.wprintfln(
 		w,
-		"\tmessage_write_header(writer_, target_, {}_{}_OPCODE, msg_size_) or_return",
+		`
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{{ buf = write_buf_ }}
+
+	message_write_header(&writer_, target_, {}_{}_OPCODE, msg_size_)`,
 		interface.name_upper,
 		req.name_upper,
 	)
@@ -273,8 +266,15 @@ codegen_request :: proc(
 			}
 		}
 		// message_write overloads cover all the cases
-		fmt.wprintfln(w, "\tmessage_write(writer_, {}) or_return", arg.name)
+		fmt.wprintfln(w, "\tmessage_write(&writer_, {})", arg.name)
 	}
+
+	fmt.wprintln(
+		w,
+		`
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)`,
+	)
 
 	switch req.type {
 	case .Basic: // no-op
@@ -380,8 +380,7 @@ codegen_event :: proc(
 		`{}_{}_parse :: proc(conn: ^Connection, message: Message) -> (event: {}_{}_Event, err: Conn_Error) {{
 	assert(message.header.target != 0)
 	assert(message.header.opcode == {}_{}_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{{ buf = message.payload }}
 	event.target = message.header.target`,
 		interface.name_snake,
 		event.name_snake,
@@ -426,20 +425,14 @@ codegen_event :: proc(
 			)
 		}
 	}
+
+	fmt.wprintln(w, "\tmessage_reader_check_empty(reader) or_return")
+
 	switch event.type {
 	case .Basic: // no-op
 	case .Destructor:
 		fmt.wprintln(w, "\tconnection_free_id(conn, message.header.target)")
 	}
-
-	fmt.wprintln(
-		w,
-		`
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}`,
-	)
 
 	fmt.wprintf(
 		w,

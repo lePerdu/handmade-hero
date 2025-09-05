@@ -267,6 +267,7 @@ audio_handle_poll :: proc(state: ^Audio_State, pfds: []posix.pollfd) -> Audio_Er
 	}
 
 	if .OUT in revents {
+		log.info("audio events:", revents)
 		return audio_write_sine_wave(state)
 	}
 	return nil

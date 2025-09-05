@@ -62,17 +62,8 @@ id_allocator_free :: proc(id_alloc: ^ID_Allocator, id: Object_Id) -> runtime.All
 Connection :: struct {
 	socket_fd:          posix.FD,
 	id_allocator:       ID_Allocator,
-	send_buf, recv_buf: bytes.Buffer,
+	send_buf, recv_buf: Buffer,
 	send_fds, recv_fds: queue.Queue(posix.FD),
-}
-
-connection_reader :: #force_inline proc(conn: ^Connection) -> io.Reader {
-	return bytes.buffer_to_stream(&conn.recv_buf)
-}
-
-connection_writer :: #force_inline proc(conn: ^Connection) -> io.Writer {
-	// TODO: Wrap in writer that flushes outgoing messages instead of just expanding the buffer
-	return bytes.buffer_to_stream(&conn.send_buf)
 }
 
 connection_alloc_id :: proc(conn: ^Connection) -> (Object_Id, ID_Error) {
@@ -101,13 +92,14 @@ ID_Error :: enum {
 	No_More_IDs,
 }
 
-Parse_Error :: enum {
+IO_Error :: enum {
 	None = 0,
-	Invalid_Message,
+	Write_Buffer_Full,
 }
 
 Conn_Error :: union #shared_nil {
 	io.Error,
+	IO_Error,
 	FD_Error,
 	ID_Error,
 	Parse_Error,
@@ -245,8 +237,8 @@ connection_init :: proc(conn: ^Connection, allocator := context.allocator) -> Co
 	}
 
 	id_allocator_init(&conn.id_allocator, allocator)
-	bytes.buffer_init_allocator(&conn.send_buf, 0, CONN_INIT_BUF_LEN, allocator)
-	bytes.buffer_init_allocator(&conn.recv_buf, 0, CONN_INIT_BUF_LEN, allocator)
+	buffer_init(&conn.send_buf, CONN_INIT_BUF_LEN, allocator)
+	buffer_init(&conn.recv_buf, CONN_INIT_BUF_LEN, allocator)
 	queue.init(&conn.send_fds, allocator = allocator)
 	queue.init(&conn.recv_fds, allocator = allocator)
 	return nil
@@ -254,8 +246,8 @@ connection_init :: proc(conn: ^Connection, allocator := context.allocator) -> Co
 
 connection_close :: proc(conn: ^Connection) -> posix.result {
 	id_allocator_destroy(&conn.id_allocator)
-	bytes.buffer_destroy(&conn.send_buf)
-	bytes.buffer_destroy(&conn.recv_buf)
+	buffer_destroy(&conn.send_buf)
+	buffer_destroy(&conn.recv_buf)
 	queue.destroy(&conn.send_fds)
 	queue.destroy(&conn.recv_fds)
 
@@ -294,7 +286,7 @@ Flush_Error :: enum {
 @(private)
 send_chunk :: proc(conn: ^Connection, max_len: int) -> Flush_Error {
 	data_iov := posix.iovec {
-		iov_base = &bytes.buffer_to_bytes(&conn.send_buf)[0],
+		iov_base = &buffer_readable(conn.send_buf)[0],
 		iov_len  = uint(max_len),
 	}
 
@@ -355,7 +347,7 @@ send_chunk :: proc(conn: ^Connection, max_len: int) -> Flush_Error {
 
 	// Mark the data as sent
 	queue.consume_front(&conn.send_fds, fds_to_send)
-	bytes.buffer_next(&conn.send_buf, send_res)
+	buffer_commit_read(&conn.send_buf, send_res)
 	return nil
 }
 
@@ -368,8 +360,8 @@ _connection_flush :: proc(conn: ^Connection) -> Flush_Error {
 	}
 
 	// Keep flushing until error or Would_Block
-	for bytes.buffer_length(&conn.send_buf) > 0 {
-		send_chunk(conn, bytes.buffer_length(&conn.send_buf)) or_return
+	for buffer_len(conn.send_buf) > 0 {
+		send_chunk(conn, buffer_len(conn.send_buf)) or_return
 	}
 	return nil
 }
@@ -383,60 +375,29 @@ connection_flush :: proc(conn: ^Connection) -> (ok: bool) {
 }
 
 connection_needs_flush :: proc(conn: ^Connection) -> bool {
-	return !bytes.buffer_is_empty(&conn.send_buf)
+	return buffer_len(conn.send_buf) > 0
 }
 
-@(private)
-_posix_socket_stream_proc :: proc(
-	stream_data: rawptr,
-	mode: io.Stream_Mode,
-	p: []u8,
-	offset: i64,
-	whence: io.Seek_From,
-) -> (
-	i64,
-	io.Error,
-) {
-	fd := posix.FD(uintptr(stream_data))
-	#partial switch mode {
-	case .Read:
-		if len(p) == 0 do return 0, .None
-		n_read: c.ssize_t
-		for {
-			n_read = posix.read(fd, &p[0], len(p))
-			if n_read == -1 && posix.errno() == .EINTR do continue
-			break
-		}
-		if n_read == -1 do return 0, .Unknown
-		if n_read == 0 do return 0, .EOF
-		return i64(n_read), .None
-	case .Write:
-		if len(p) == 0 do return 0, .None
-		n_written: c.ssize_t
-		for {
-			n_written = posix.write(fd, &p[0], len(p))
-			if n_written == -1 && posix.errno() == .EINTR do continue
-			break
-		}
-		if n_written == -1 do return 0, .Unknown
-		if n_written == 0 do return 0, .EOF
-		return i64(n_written), .None
-	case .Close:
-		if posix.close(fd) == .OK {
-			return 0, .None
-		} else {
-			return 0, .Unknown
-		}
-	case .Query:
-		return io.query_utility({.Read, .Write, .Close})
-	case:
-		return 0, .Empty
-	}
+// Reserve space for an upcoming write, potentially flushing the write buffer
+connection_prepare_write :: proc(conn: ^Connection, size: u16) -> (buf: []u8, err: Conn_Error) {
+	size := int(size) // int is more useful, u16 used to limit API
+	if size <= buffer_space(conn.send_buf) do return buffer_writable(conn.send_buf)[:size], nil
+
+	// Try to make space by flushing before allocating (but only if it can be
+	// flushed without blocking)
+	// TODO: Make smarted decision about when to resize the buffer instead of
+	// flushing?
+	// For the use-case here, large messages are uncommon (/impossible?), so if
+	// the buffer can't fit a message, then it is likely almost full anyway.
+	_ = connection_flush(conn)
+
+	// Move data around or grow the buffer
+	if buffer_ensure_space(&conn.send_buf, size) != nil do return nil, .Write_Buffer_Full
+	return buffer_writable(conn.send_buf)[:size], nil
 }
 
-@(private)
-socket_to_stream :: proc(socket_fd: posix.FD) -> io.Read_Write_Closer {
-	return {procedure = _posix_socket_stream_proc, data = rawptr(uintptr(socket_fd))}
+connection_commit_write :: proc(conn: ^Connection, size: u16) {
+	buffer_commit_write(&conn.send_buf, int(size))
 }
 
 Read_Error :: enum {
@@ -446,22 +407,17 @@ Read_Error :: enum {
 }
 
 @(private)
-read_chunk :: proc(conn: ^Connection, read_at_least: int) -> (n: int, err: Read_Error) {
-	// Create capacity in the buffer for read_at_least
-	init_len := bytes.buffer_length(&conn.recv_buf)
-	bytes.buffer_grow(&conn.recv_buf, max(bytes.MIN_READ, read_at_least))
-	// Update space in case the buffer was grown larger
-	end_off := len(conn.recv_buf.buf)
-	space := bytes.buffer_capacity(&conn.recv_buf) - end_off
-	// TODO: Figure out a way to do this that doesn't require messing around with bytes.Buffer's internal state
-	resize(&conn.recv_buf.buf, bytes.buffer_capacity(&conn.recv_buf))
+MIN_READ :: 512
 
-	// Collapse the buffer to fit existing data
-	defer bytes.buffer_truncate(&conn.recv_buf, init_len + n)
+@(private)
+read_chunk :: proc(conn: ^Connection, read_at_least: int) -> (n: int, err: Read_Error) {
+	if buffer_ensure_space(&conn.recv_buf, max(MIN_READ, read_at_least)) != nil {
+		return 0, .Failed
+	}
 
 	data_iov := posix.iovec {
-		iov_base = &bytes.buffer_to_bytes(&conn.recv_buf)[end_off],
-		iov_len  = uint(space),
+		iov_base = &buffer_writable(conn.recv_buf)[0],
+		iov_len  = uint(buffer_space(conn.recv_buf)),
 	}
 
 	// Wrap in a struct to ensure alignment
@@ -492,6 +448,7 @@ read_chunk :: proc(conn: ^Connection, read_at_least: int) -> (n: int, err: Read_
 		return 0, .Failed
 	}
 
+	buffer_commit_write(&conn.recv_buf, recv_res)
 	n = recv_res
 
 	if cmsg := posix.CMSG_FIRSTHDR(&msg); cmsg != nil {
@@ -520,28 +477,29 @@ fill_read_buffer :: proc(conn: ^Connection, read_at_least: int) -> (n: int, err:
 
 @(private)
 try_parse_buffered_message :: proc(conn: ^Connection) -> (message: Message, bytes_needed: int) {
-	buf_len := bytes.buffer_length(&conn.recv_buf)
-	if bytes_needed = message_header_size - buf_len; bytes_needed > 0 {
+	buf := buffer_readable(conn.recv_buf)
+	if bytes_needed = message_header_size - len(buf); bytes_needed > 0 {
 		return
 	}
 
 	// Copy the bytes, but don't advance the buffer until we know the full message is available
 	header_bytes: [message_header_size]u8
-	copy(header_bytes[:], bytes.buffer_to_bytes(&conn.recv_buf))
+	copy(header_bytes[:], buf)
 
 	message.header = message_parse_header(header_bytes)
-	if message.header.size < message_header_size {
-		log.error("message size field too small:", message.header.size)
+	total_size := int(message.header.size)
+	if total_size < message_header_size {
+		log.error("message size field too small:", total_size)
 		bytes_needed = -1
 		return
 	}
-	if bytes_needed = int(message.header.size) - buf_len; bytes_needed > 0 {
+	if bytes_needed = total_size - len(buf); bytes_needed > 0 {
 		return
 	}
 
-	message.payload =
-	bytes.buffer_next(&conn.recv_buf, int(message.header.size))[message_header_size:]
+	message.payload = buf[message_header_size:total_size]
 	bytes_needed = 0
+	buffer_commit_read(&conn.recv_buf, total_size)
 	return
 }
 
@@ -572,8 +530,4 @@ connection_next_event :: proc(conn: ^Connection) -> (message: Message, err: Read
 		if n_read < bytes_needed do return {}, .Would_Block
 	}
 	return
-}
-
-connection_skip_event :: proc(conn: ^Connection, header: Event_Header) {
-	_ = bytes.buffer_next(&conn.recv_buf, int(header.size))
 }

@@ -170,6 +170,7 @@ display_get_poll_descriptor :: proc(state: ^Display_State) -> (poll: posix.pollf
 
 display_handle_poll :: proc(state: ^Display_State, poll: ^posix.pollfd) -> (ok: bool) {
 	if poll.revents & {.IN, .OUT} == {} do return true
+	log.info("display events:", poll.revents)
 	process_wayland_messages(state)
 	if state.key_states[.Esc] do state.close_requested = true
 	return true

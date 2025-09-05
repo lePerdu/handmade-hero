@@ -29,8 +29,6 @@
 
 package wayland
 
-import "core:bytes"
-import "core:io"
 import "core:log"
 import "core:sys/posix"
 
@@ -68,9 +66,15 @@ XDG_WM_BASE_DESTROY_OPCODE: Opcode : 0
 // still alive created by this xdg_wm_base object instance is illegal
 // and will result in a defunct_surfaces error.
 xdg_wm_base_destroy :: proc(conn_: ^Connection, target_: Xdg_Wm_Base, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, XDG_WM_BASE_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_WM_BASE_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "xdg_wm_base" + "@{}." + "destroy" + ":", target_)
 	return
@@ -83,11 +87,17 @@ XDG_WM_BASE_CREATE_POSITIONER_OPCODE: Opcode : 1
 // surfaces relative to some parent surface. See the interface description
 // and xdg_surface.get_popup for details.
 xdg_wm_base_create_positioner :: proc(conn_: ^Connection, target_: Xdg_Wm_Base, ) -> (id: Xdg_Positioner, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, XDG_WM_BASE_CREATE_POSITIONER_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_WM_BASE_CREATE_POSITIONER_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
+	message_write(&writer_, id)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_wm_base" + "@{}." + "create_positioner" + ":" + " " + "id" + "={}", target_, id)
 	return
 }
@@ -109,12 +119,18 @@ XDG_WM_BASE_GET_XDG_SURFACE_OPCODE: Opcode : 2
 // See the documentation of xdg_surface for more details about what an
 // xdg_surface is and how it is used.
 xdg_wm_base_get_xdg_surface :: proc(conn_: ^Connection, target_: Xdg_Wm_Base, surface: Wl_Surface, ) -> (id: Xdg_Surface, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, XDG_WM_BASE_GET_XDG_SURFACE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_WM_BASE_GET_XDG_SURFACE_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
-	message_write(writer_, surface) or_return
+	message_write(&writer_, id)
+	message_write(&writer_, surface)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_wm_base" + "@{}." + "get_xdg_surface" + ":" + " " + "id" + "={}" + " " + "surface" + "={}", target_, id, surface)
 	return
 }
@@ -127,10 +143,16 @@ XDG_WM_BASE_PONG_OPCODE: Opcode : 3
 // and xdg_wm_base.error.unresponsive.
 // - serial: serial of the ping event
 xdg_wm_base_pong :: proc(conn_: ^Connection, target_: Xdg_Wm_Base, serial: u32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, XDG_WM_BASE_PONG_OPCODE, msg_size_) or_return
-	message_write(writer_, serial) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_WM_BASE_PONG_OPCODE, msg_size_)
+	message_write(&writer_, serial)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_wm_base" + "@{}." + "pong" + ":" + " " + "serial" + "={}", target_, serial)
 	return
 }
@@ -159,15 +181,10 @@ XDG_WM_BASE_PING_EVENT_OPCODE: Event_Opcode : 0
 xdg_wm_base_ping_parse :: proc(conn: ^Connection, message: Message) -> (event: Xdg_Wm_Base_Ping_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == XDG_WM_BASE_PING_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "xdg_wm_base" + "@{}." + "ping" + ":" + " " + "serial" + "={}", event.target, event.serial)
 	return
 }
@@ -304,9 +321,15 @@ XDG_POSITIONER_DESTROY_OPCODE: Opcode : 0
 //
 // Notify the compositor that the xdg_positioner will no longer be used.
 xdg_positioner_destroy :: proc(conn_: ^Connection, target_: Xdg_Positioner, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, XDG_POSITIONER_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POSITIONER_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "xdg_positioner" + "@{}." + "destroy" + ":", target_)
 	return
@@ -323,11 +346,17 @@ XDG_POSITIONER_SET_SIZE_OPCODE: Opcode : 1
 // - width: width of positioned rectangle
 // - height: height of positioned rectangle
 xdg_positioner_set_size :: proc(conn_: ^Connection, target_: Xdg_Positioner, width: i32, height: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, XDG_POSITIONER_SET_SIZE_OPCODE, msg_size_) or_return
-	message_write(writer_, width) or_return
-	message_write(writer_, height) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POSITIONER_SET_SIZE_OPCODE, msg_size_)
+	message_write(&writer_, width)
+	message_write(&writer_, height)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_positioner" + "@{}." + "set_size" + ":" + " " + "width" + "={}" + " " + "height" + "={}", target_, width, height)
 	return
 }
@@ -350,13 +379,19 @@ XDG_POSITIONER_SET_ANCHOR_RECT_OPCODE: Opcode : 2
 // - width: width of anchor rectangle
 // - height: height of anchor rectangle
 xdg_positioner_set_anchor_rect :: proc(conn_: ^Connection, target_: Xdg_Positioner, x: i32, y: i32, width: i32, height: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 16
-	message_write_header(writer_, target_, XDG_POSITIONER_SET_ANCHOR_RECT_OPCODE, msg_size_) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
-	message_write(writer_, width) or_return
-	message_write(writer_, height) or_return
+	msg_size_: u16 = message_header_size + 16
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POSITIONER_SET_ANCHOR_RECT_OPCODE, msg_size_)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+	message_write(&writer_, width)
+	message_write(&writer_, height)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_positioner" + "@{}." + "set_anchor_rect" + ":" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "width" + "={}" + " " + "height" + "={}", target_, x, y, width, height)
 	return
 }
@@ -372,10 +407,16 @@ XDG_POSITIONER_SET_ANCHOR_OPCODE: Opcode : 3
 // edge, or in the center of the anchor rectangle if no edge is specified.
 // - anchor: anchor
 xdg_positioner_set_anchor :: proc(conn_: ^Connection, target_: Xdg_Positioner, anchor: Xdg_Positioner_Anchor_Enum, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, XDG_POSITIONER_SET_ANCHOR_OPCODE, msg_size_) or_return
-	message_write(writer_, anchor) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POSITIONER_SET_ANCHOR_OPCODE, msg_size_)
+	message_write(&writer_, anchor)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_positioner" + "@{}." + "set_anchor" + ":" + " " + "anchor" + "={}", target_, anchor)
 	return
 }
@@ -392,10 +433,16 @@ XDG_POSITIONER_SET_GRAVITY_OPCODE: Opcode : 4
 // invalid_input error is raised.
 // - gravity: gravity direction
 xdg_positioner_set_gravity :: proc(conn_: ^Connection, target_: Xdg_Positioner, gravity: Xdg_Positioner_Gravity_Enum, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, XDG_POSITIONER_SET_GRAVITY_OPCODE, msg_size_) or_return
-	message_write(writer_, gravity) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POSITIONER_SET_GRAVITY_OPCODE, msg_size_)
+	message_write(&writer_, gravity)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_positioner" + "@{}." + "set_gravity" + ":" + " " + "gravity" + "={}", target_, gravity)
 	return
 }
@@ -418,10 +465,16 @@ XDG_POSITIONER_SET_CONSTRAINT_ADJUSTMENT_OPCODE: Opcode : 5
 // The default adjustment is none.
 // - constraint_adjustment: bit mask of constraint adjustments
 xdg_positioner_set_constraint_adjustment :: proc(conn_: ^Connection, target_: Xdg_Positioner, constraint_adjustment: Xdg_Positioner_Constraint_Adjustment_Enum, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, XDG_POSITIONER_SET_CONSTRAINT_ADJUSTMENT_OPCODE, msg_size_) or_return
-	message_write(writer_, constraint_adjustment) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POSITIONER_SET_CONSTRAINT_ADJUSTMENT_OPCODE, msg_size_)
+	message_write(&writer_, constraint_adjustment)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_positioner" + "@{}." + "set_constraint_adjustment" + ":" + " " + "constraint_adjustment" + "={}", target_, constraint_adjustment)
 	return
 }
@@ -443,11 +496,17 @@ XDG_POSITIONER_SET_OFFSET_OPCODE: Opcode : 6
 // - x: surface position x offset
 // - y: surface position y offset
 xdg_positioner_set_offset :: proc(conn_: ^Connection, target_: Xdg_Positioner, x: i32, y: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, XDG_POSITIONER_SET_OFFSET_OPCODE, msg_size_) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POSITIONER_SET_OFFSET_OPCODE, msg_size_)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_positioner" + "@{}." + "set_offset" + ":" + " " + "x" + "={}" + " " + "y" + "={}", target_, x, y)
 	return
 }
@@ -462,9 +521,15 @@ XDG_POSITIONER_SET_REACTIVE_OPCODE: Opcode : 7
 // xdg_popup.configure event is sent with updated geometry, followed by an
 // xdg_surface.configure event.
 xdg_positioner_set_reactive :: proc(conn_: ^Connection, target_: Xdg_Positioner, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, XDG_POSITIONER_SET_REACTIVE_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POSITIONER_SET_REACTIVE_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_positioner" + "@{}." + "set_reactive" + ":", target_)
 	return
 }
@@ -481,11 +546,17 @@ XDG_POSITIONER_SET_PARENT_SIZE_OPCODE: Opcode : 8
 // - parent_width: future window geometry width of parent
 // - parent_height: future window geometry height of parent
 xdg_positioner_set_parent_size :: proc(conn_: ^Connection, target_: Xdg_Positioner, parent_width: i32, parent_height: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, XDG_POSITIONER_SET_PARENT_SIZE_OPCODE, msg_size_) or_return
-	message_write(writer_, parent_width) or_return
-	message_write(writer_, parent_height) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POSITIONER_SET_PARENT_SIZE_OPCODE, msg_size_)
+	message_write(&writer_, parent_width)
+	message_write(&writer_, parent_height)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_positioner" + "@{}." + "set_parent_size" + ":" + " " + "parent_width" + "={}" + " " + "parent_height" + "={}", target_, parent_width, parent_height)
 	return
 }
@@ -499,10 +570,16 @@ XDG_POSITIONER_SET_PARENT_CONFIGURE_OPCODE: Opcode : 9
 // constrained using.
 // - serial: serial of parent configure event
 xdg_positioner_set_parent_configure :: proc(conn_: ^Connection, target_: Xdg_Positioner, serial: u32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, XDG_POSITIONER_SET_PARENT_CONFIGURE_OPCODE, msg_size_) or_return
-	message_write(writer_, serial) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POSITIONER_SET_PARENT_CONFIGURE_OPCODE, msg_size_)
+	message_write(&writer_, serial)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_positioner" + "@{}." + "set_parent_configure" + ":" + " " + "serial" + "={}", target_, serial)
 	return
 }
@@ -580,9 +657,15 @@ XDG_SURFACE_DESTROY_OPCODE: Opcode : 0
 // after its role object has been destroyed, otherwise
 // a defunct_role_object error is raised.
 xdg_surface_destroy :: proc(conn_: ^Connection, target_: Xdg_Surface, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, XDG_SURFACE_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_SURFACE_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "xdg_surface" + "@{}." + "destroy" + ":", target_)
 	return
@@ -597,11 +680,17 @@ XDG_SURFACE_GET_TOPLEVEL_OPCODE: Opcode : 1
 // See the documentation of xdg_toplevel for more details about what an
 // xdg_toplevel is and how it is used.
 xdg_surface_get_toplevel :: proc(conn_: ^Connection, target_: Xdg_Surface, ) -> (id: Xdg_Toplevel, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, XDG_SURFACE_GET_TOPLEVEL_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_SURFACE_GET_TOPLEVEL_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
+	message_write(&writer_, id)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_surface" + "@{}." + "get_toplevel" + ":" + " " + "id" + "={}", target_, id)
 	return
 }
@@ -618,13 +707,19 @@ XDG_SURFACE_GET_POPUP_OPCODE: Opcode : 2
 // See the documentation of xdg_popup for more details about what an
 // xdg_popup is and how it is used.
 xdg_surface_get_popup :: proc(conn_: ^Connection, target_: Xdg_Surface, parent: Xdg_Surface, positioner: Xdg_Positioner, ) -> (id: Xdg_Popup, err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 12
-	message_write_header(writer_, target_, XDG_SURFACE_GET_POPUP_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 12
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_SURFACE_GET_POPUP_OPCODE, msg_size_)
 	id = connection_alloc_id(conn_) or_return
-	message_write(writer_, id) or_return
-	message_write(writer_, parent) or_return
-	message_write(writer_, positioner) or_return
+	message_write(&writer_, id)
+	message_write(&writer_, parent)
+	message_write(&writer_, positioner)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_surface" + "@{}." + "get_popup" + ":" + " " + "id" + "={}" + " " + "parent" + "={}" + " " + "positioner" + "={}", target_, id, parent, positioner)
 	return
 }
@@ -670,13 +765,19 @@ XDG_SURFACE_SET_WINDOW_GEOMETRY_OPCODE: Opcode : 3
 // greater than zero. Setting an invalid size will raise an
 // invalid_size error.
 xdg_surface_set_window_geometry :: proc(conn_: ^Connection, target_: Xdg_Surface, x: i32, y: i32, width: i32, height: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 16
-	message_write_header(writer_, target_, XDG_SURFACE_SET_WINDOW_GEOMETRY_OPCODE, msg_size_) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
-	message_write(writer_, width) or_return
-	message_write(writer_, height) or_return
+	msg_size_: u16 = message_header_size + 16
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_SURFACE_SET_WINDOW_GEOMETRY_OPCODE, msg_size_)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+	message_write(&writer_, width)
+	message_write(&writer_, height)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_surface" + "@{}." + "set_window_geometry" + ":" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "width" + "={}" + " " + "height" + "={}", target_, x, y, width, height)
 	return
 }
@@ -718,10 +819,16 @@ XDG_SURFACE_ACK_CONFIGURE_OPCODE: Opcode : 4
 // xdg_surface. Doing so will raise an invalid_serial error.
 // - serial: the serial from the configure event
 xdg_surface_ack_configure :: proc(conn_: ^Connection, target_: Xdg_Surface, serial: u32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, XDG_SURFACE_ACK_CONFIGURE_OPCODE, msg_size_) or_return
-	message_write(writer_, serial) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_SURFACE_ACK_CONFIGURE_OPCODE, msg_size_)
+	message_write(&writer_, serial)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_surface" + "@{}." + "ack_configure" + ":" + " " + "serial" + "={}", target_, serial)
 	return
 }
@@ -753,15 +860,10 @@ XDG_SURFACE_CONFIGURE_EVENT_OPCODE: Event_Opcode : 0
 xdg_surface_configure_parse :: proc(conn: ^Connection, message: Message) -> (event: Xdg_Surface_Configure_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == XDG_SURFACE_CONFIGURE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.serial = message_read_u32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "xdg_surface" + "@{}." + "configure" + ":" + " " + "serial" + "={}", event.target, event.serial)
 	return
 }
@@ -908,9 +1010,15 @@ XDG_TOPLEVEL_DESTROY_OPCODE: Opcode : 0
 // This request destroys the role surface and unmaps the surface;
 // see "Unmapping" behavior in interface section for details.
 xdg_toplevel_destroy :: proc(conn_: ^Connection, target_: Xdg_Toplevel, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, XDG_TOPLEVEL_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "destroy" + ":", target_)
 	return
@@ -940,10 +1048,16 @@ XDG_TOPLEVEL_SET_PARENT_OPCODE: Opcode : 1
 // descendants, and the parent must be different from the child toplevel,
 // otherwise the invalid_parent protocol error is raised.
 xdg_toplevel_set_parent :: proc(conn_: ^Connection, target_: Xdg_Toplevel, parent: Xdg_Toplevel, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, XDG_TOPLEVEL_SET_PARENT_OPCODE, msg_size_) or_return
-	message_write(writer_, parent) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_SET_PARENT_OPCODE, msg_size_)
+	message_write(&writer_, parent)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "set_parent" + ":" + " " + "parent" + "={}", target_, parent)
 	return
 }
@@ -959,11 +1073,17 @@ XDG_TOPLEVEL_SET_TITLE_OPCODE: Opcode : 2
 // 
 // The string must be encoded in UTF-8.
 xdg_toplevel_set_title :: proc(conn_: ^Connection, target_: Xdg_Toplevel, title: string, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
+	msg_size_: u16 = message_header_size + 4
 	msg_size_ += message_string_size(len(title))
-	message_write_header(writer_, target_, XDG_TOPLEVEL_SET_TITLE_OPCODE, msg_size_) or_return
-	message_write(writer_, title) or_return
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_SET_TITLE_OPCODE, msg_size_)
+	message_write(&writer_, title)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "set_title" + ":" + " " + "title" + "={}", target_, title)
 	return
 }
@@ -995,11 +1115,17 @@ XDG_TOPLEVEL_SET_APP_ID_OPCODE: Opcode : 3
 // 
 // [0] https://standards.freedesktop.org/desktop-entry-spec/
 xdg_toplevel_set_app_id :: proc(conn_: ^Connection, target_: Xdg_Toplevel, app_id: string, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
+	msg_size_: u16 = message_header_size + 4
 	msg_size_ += message_string_size(len(app_id))
-	message_write_header(writer_, target_, XDG_TOPLEVEL_SET_APP_ID_OPCODE, msg_size_) or_return
-	message_write(writer_, app_id) or_return
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_SET_APP_ID_OPCODE, msg_size_)
+	message_write(&writer_, app_id)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "set_app_id" + ":" + " " + "app_id" + "={}", target_, app_id)
 	return
 }
@@ -1024,13 +1150,19 @@ XDG_TOPLEVEL_SHOW_WINDOW_MENU_OPCODE: Opcode : 4
 // - x: the x position to pop up the window menu at
 // - y: the y position to pop up the window menu at
 xdg_toplevel_show_window_menu :: proc(conn_: ^Connection, target_: Xdg_Toplevel, seat: Wl_Seat, serial: u32, x: i32, y: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 16
-	message_write_header(writer_, target_, XDG_TOPLEVEL_SHOW_WINDOW_MENU_OPCODE, msg_size_) or_return
-	message_write(writer_, seat) or_return
-	message_write(writer_, serial) or_return
-	message_write(writer_, x) or_return
-	message_write(writer_, y) or_return
+	msg_size_: u16 = message_header_size + 16
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_SHOW_WINDOW_MENU_OPCODE, msg_size_)
+	message_write(&writer_, seat)
+	message_write(&writer_, serial)
+	message_write(&writer_, x)
+	message_write(&writer_, y)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "show_window_menu" + ":" + " " + "seat" + "={}" + " " + "serial" + "={}" + " " + "x" + "={}" + " " + "y" + "={}", target_, seat, serial, x, y)
 	return
 }
@@ -1057,11 +1189,17 @@ XDG_TOPLEVEL_MOVE_OPCODE: Opcode : 5
 // - seat: the wl_seat of the user event
 // - serial: the serial of the user event
 xdg_toplevel_move :: proc(conn_: ^Connection, target_: Xdg_Toplevel, seat: Wl_Seat, serial: u32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, XDG_TOPLEVEL_MOVE_OPCODE, msg_size_) or_return
-	message_write(writer_, seat) or_return
-	message_write(writer_, serial) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_MOVE_OPCODE, msg_size_)
+	message_write(&writer_, seat)
+	message_write(&writer_, serial)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "move" + ":" + " " + "seat" + "={}" + " " + "serial" + "={}", target_, seat, serial)
 	return
 }
@@ -1104,12 +1242,18 @@ XDG_TOPLEVEL_RESIZE_OPCODE: Opcode : 6
 // - serial: the serial of the user event
 // - edges: which edge or corner is being dragged
 xdg_toplevel_resize :: proc(conn_: ^Connection, target_: Xdg_Toplevel, seat: Wl_Seat, serial: u32, edges: Xdg_Toplevel_Resize_Edge_Enum, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 12
-	message_write_header(writer_, target_, XDG_TOPLEVEL_RESIZE_OPCODE, msg_size_) or_return
-	message_write(writer_, seat) or_return
-	message_write(writer_, serial) or_return
-	message_write(writer_, edges) or_return
+	msg_size_: u16 = message_header_size + 12
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_RESIZE_OPCODE, msg_size_)
+	message_write(&writer_, seat)
+	message_write(&writer_, serial)
+	message_write(&writer_, edges)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "resize" + ":" + " " + "seat" + "={}" + " " + "serial" + "={}" + " " + "edges" + "={}", target_, seat, serial, edges)
 	return
 }
@@ -1151,11 +1295,17 @@ XDG_TOPLEVEL_SET_MAX_SIZE_OPCODE: Opcode : 7
 // strictly negative values for width or height will result in a
 // invalid_size error.
 xdg_toplevel_set_max_size :: proc(conn_: ^Connection, target_: Xdg_Toplevel, width: i32, height: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, XDG_TOPLEVEL_SET_MAX_SIZE_OPCODE, msg_size_) or_return
-	message_write(writer_, width) or_return
-	message_write(writer_, height) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_SET_MAX_SIZE_OPCODE, msg_size_)
+	message_write(&writer_, width)
+	message_write(&writer_, height)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "set_max_size" + ":" + " " + "width" + "={}" + " " + "height" + "={}", target_, width, height)
 	return
 }
@@ -1197,11 +1347,17 @@ XDG_TOPLEVEL_SET_MIN_SIZE_OPCODE: Opcode : 8
 // strictly negative values for width and height will result in a
 // invalid_size error.
 xdg_toplevel_set_min_size :: proc(conn_: ^Connection, target_: Xdg_Toplevel, width: i32, height: i32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, XDG_TOPLEVEL_SET_MIN_SIZE_OPCODE, msg_size_) or_return
-	message_write(writer_, width) or_return
-	message_write(writer_, height) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_SET_MIN_SIZE_OPCODE, msg_size_)
+	message_write(&writer_, width)
+	message_write(&writer_, height)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "set_min_size" + ":" + " " + "width" + "={}" + " " + "height" + "={}", target_, width, height)
 	return
 }
@@ -1229,9 +1385,15 @@ XDG_TOPLEVEL_SET_MAXIMIZED_OPCODE: Opcode : 9
 // effect. It may alter the state the surface is returned to when
 // unmaximized unless overridden by the compositor.
 xdg_toplevel_set_maximized :: proc(conn_: ^Connection, target_: Xdg_Toplevel, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, XDG_TOPLEVEL_SET_MAXIMIZED_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_SET_MAXIMIZED_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "set_maximized" + ":", target_)
 	return
 }
@@ -1261,9 +1423,15 @@ XDG_TOPLEVEL_UNSET_MAXIMIZED_OPCODE: Opcode : 10
 // effect. It may alter the state the surface is returned to when
 // unmaximized unless overridden by the compositor.
 xdg_toplevel_unset_maximized :: proc(conn_: ^Connection, target_: Xdg_Toplevel, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, XDG_TOPLEVEL_UNSET_MAXIMIZED_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_UNSET_MAXIMIZED_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "unset_maximized" + ":", target_)
 	return
 }
@@ -1295,10 +1463,16 @@ XDG_TOPLEVEL_SET_FULLSCREEN_OPCODE: Opcode : 11
 // up of subsurfaces, popups or similarly coupled surfaces) are not
 // visible below the fullscreened surface.
 xdg_toplevel_set_fullscreen :: proc(conn_: ^Connection, target_: Xdg_Toplevel, output: Wl_Output, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 4
-	message_write_header(writer_, target_, XDG_TOPLEVEL_SET_FULLSCREEN_OPCODE, msg_size_) or_return
-	message_write(writer_, output) or_return
+	msg_size_: u16 = message_header_size + 4
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_SET_FULLSCREEN_OPCODE, msg_size_)
+	message_write(&writer_, output)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "set_fullscreen" + ":" + " " + "output" + "={}", target_, output)
 	return
 }
@@ -1324,9 +1498,15 @@ XDG_TOPLEVEL_UNSET_FULLSCREEN_OPCODE: Opcode : 12
 // The client must also acknowledge the configure when committing the new
 // content (see ack_configure).
 xdg_toplevel_unset_fullscreen :: proc(conn_: ^Connection, target_: Xdg_Toplevel, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, XDG_TOPLEVEL_UNSET_FULLSCREEN_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_UNSET_FULLSCREEN_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "unset_fullscreen" + ":", target_)
 	return
 }
@@ -1343,9 +1523,15 @@ XDG_TOPLEVEL_SET_MINIMIZED_OPCODE: Opcode : 13
 // also work with live previews on windows in Alt-Tab, Expose or
 // similar compositor features.
 xdg_toplevel_set_minimized :: proc(conn_: ^Connection, target_: Xdg_Toplevel, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, XDG_TOPLEVEL_SET_MINIMIZED_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_TOPLEVEL_SET_MINIMIZED_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_toplevel" + "@{}." + "set_minimized" + ":", target_)
 	return
 }
@@ -1381,17 +1567,12 @@ XDG_TOPLEVEL_CONFIGURE_EVENT_OPCODE: Event_Opcode : 0
 xdg_toplevel_configure_parse :: proc(conn: ^Connection, message: Message) -> (event: Xdg_Toplevel_Configure_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == XDG_TOPLEVEL_CONFIGURE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.width = message_read_i32(&reader) or_return
 	event.height = message_read_i32(&reader) or_return
 	event.states = message_read_array(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "xdg_toplevel" + "@{}." + "configure" + ":" + " " + "width" + "={}" + " " + "height" + "={}" + " " + "states" + "={}", event.target, event.width, event.height, event.states)
 	return
 }
@@ -1413,14 +1594,9 @@ XDG_TOPLEVEL_CLOSE_EVENT_OPCODE: Event_Opcode : 1
 xdg_toplevel_close_parse :: proc(conn: ^Connection, message: Message) -> (event: Xdg_Toplevel_Close_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == XDG_TOPLEVEL_CLOSE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "xdg_toplevel" + "@{}." + "close" + ":", event.target)
 	return
 }
@@ -1451,16 +1627,11 @@ XDG_TOPLEVEL_CONFIGURE_BOUNDS_EVENT_OPCODE: Event_Opcode : 2
 xdg_toplevel_configure_bounds_parse :: proc(conn: ^Connection, message: Message) -> (event: Xdg_Toplevel_Configure_Bounds_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == XDG_TOPLEVEL_CONFIGURE_BOUNDS_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.width = message_read_i32(&reader) or_return
 	event.height = message_read_i32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "xdg_toplevel" + "@{}." + "configure_bounds" + ":" + " " + "width" + "={}" + " " + "height" + "={}", event.target, event.width, event.height)
 	return
 }
@@ -1496,15 +1667,10 @@ XDG_TOPLEVEL_WM_CAPABILITIES_EVENT_OPCODE: Event_Opcode : 3
 xdg_toplevel_wm_capabilities_parse :: proc(conn: ^Connection, message: Message) -> (event: Xdg_Toplevel_Wm_Capabilities_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == XDG_TOPLEVEL_WM_CAPABILITIES_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.capabilities = message_read_array(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "xdg_toplevel" + "@{}." + "wm_capabilities" + ":" + " " + "capabilities" + "={}", event.target, event.capabilities)
 	return
 }
@@ -1550,9 +1716,15 @@ XDG_POPUP_DESTROY_OPCODE: Opcode : 0
 // If this xdg_popup is not the "topmost" popup, the
 // xdg_wm_base.not_the_topmost_popup protocol error will be sent.
 xdg_popup_destroy :: proc(conn_: ^Connection, target_: Xdg_Popup, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 0
-	message_write_header(writer_, target_, XDG_POPUP_DESTROY_OPCODE, msg_size_) or_return
+	msg_size_: u16 = message_header_size + 0
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POPUP_DESTROY_OPCODE, msg_size_)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	connection_free_id(conn_, target_)
 	log.debugf("-> " + "xdg_popup" + "@{}." + "destroy" + ":", target_)
 	return
@@ -1601,11 +1773,17 @@ XDG_POPUP_GRAB_OPCODE: Opcode : 1
 // - seat: the wl_seat of the user event
 // - serial: the serial of the user event
 xdg_popup_grab :: proc(conn_: ^Connection, target_: Xdg_Popup, seat: Wl_Seat, serial: u32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, XDG_POPUP_GRAB_OPCODE, msg_size_) or_return
-	message_write(writer_, seat) or_return
-	message_write(writer_, serial) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POPUP_GRAB_OPCODE, msg_size_)
+	message_write(&writer_, seat)
+	message_write(&writer_, serial)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_popup" + "@{}." + "grab" + ":" + " " + "seat" + "={}" + " " + "serial" + "={}", target_, seat, serial)
 	return
 }
@@ -1638,11 +1816,17 @@ XDG_POPUP_REPOSITION_OPCODE: Opcode : 2
 // send an xdg_positioner.set_parent_size request.
 // - token: reposition request token
 xdg_popup_reposition :: proc(conn_: ^Connection, target_: Xdg_Popup, positioner: Xdg_Positioner, token: u32, ) -> (err_: Conn_Error) {
-	writer_ := connection_writer(conn_)
-	msg_size_ :u16 = message_header_size + 8
-	message_write_header(writer_, target_, XDG_POPUP_REPOSITION_OPCODE, msg_size_) or_return
-	message_write(writer_, positioner) or_return
-	message_write(writer_, token) or_return
+	msg_size_: u16 = message_header_size + 8
+
+	write_buf_ := connection_prepare_write(conn_, msg_size_) or_return
+	writer_ := Msg_Writer{ buf = write_buf_ }
+
+	message_write_header(&writer_, target_, XDG_POPUP_REPOSITION_OPCODE, msg_size_)
+	message_write(&writer_, positioner)
+	message_write(&writer_, token)
+
+	message_writer_assert_full(writer_)
+	connection_commit_write(conn_, msg_size_)
 	log.debugf("-> " + "xdg_popup" + "@{}." + "reposition" + ":" + " " + "positioner" + "={}" + " " + "token" + "={}", target_, positioner, token)
 	return
 }
@@ -1676,18 +1860,13 @@ XDG_POPUP_CONFIGURE_EVENT_OPCODE: Event_Opcode : 0
 xdg_popup_configure_parse :: proc(conn: ^Connection, message: Message) -> (event: Xdg_Popup_Configure_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == XDG_POPUP_CONFIGURE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.x = message_read_i32(&reader) or_return
 	event.y = message_read_i32(&reader) or_return
 	event.width = message_read_i32(&reader) or_return
 	event.height = message_read_i32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "xdg_popup" + "@{}." + "configure" + ":" + " " + "x" + "={}" + " " + "y" + "={}" + " " + "width" + "={}" + " " + "height" + "={}", event.target, event.x, event.y, event.width, event.height)
 	return
 }
@@ -1704,14 +1883,9 @@ XDG_POPUP_POPUP_DONE_EVENT_OPCODE: Event_Opcode : 1
 xdg_popup_popup_done_parse :: proc(conn: ^Connection, message: Message) -> (event: Xdg_Popup_Popup_Done_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == XDG_POPUP_POPUP_DONE_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "xdg_popup" + "@{}." + "popup_done" + ":", event.target)
 	return
 }
@@ -1742,15 +1916,10 @@ XDG_POPUP_REPOSITIONED_EVENT_OPCODE: Event_Opcode : 2
 xdg_popup_repositioned_parse :: proc(conn: ^Connection, message: Message) -> (event: Xdg_Popup_Repositioned_Event, err: Conn_Error) {
 	assert(message.header.target != 0)
 	assert(message.header.opcode == XDG_POPUP_REPOSITIONED_EVENT_OPCODE)
-	reader: bytes.Reader
-	bytes.reader_init(&reader, message.payload)
+	reader := Msg_Reader{ buf = message.payload }
 	event.target = message.header.target
 	event.token = message_read_u32(&reader) or_return
-
-	if bytes.reader_length(&reader) > 0 {
-	    log.error("message size mis-match: header={} parsed_size={}", message.header, reader.i)
-		return {}, .Invalid_Message
-	}
+	message_reader_check_empty(reader) or_return
 	log.debugf("<- " + "xdg_popup" + "@{}." + "repositioned" + ":" + " " + "token" + "={}", event.target, event.token)
 	return
 }
