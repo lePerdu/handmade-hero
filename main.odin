@@ -1,6 +1,7 @@
 package main
 
 import "core:log"
+import "core:mem"
 import "core:os"
 import "core:sys/posix"
 
@@ -13,21 +14,24 @@ Game_State :: struct {
 
 event_loop :: proc(state: ^Game_State) {
 	loop: for !state.display.close_requested {
-		poll_fds: [DISPLAY_POLL_FDS + AUDIO_MAX_POLL_FDS]posix.pollfd
-		nfds := 0 // Actual number
+		// Fixed-capacity dynamic array
+		// TODO: Use temp_allocator with intial size to avoid pre-allocating a "worst-case"?
+		// NOTE: If that is changed, we can't take references to slices of the dynamic array for
+		// use after polling, since it may have moved
+		poll_fds_buf: [DISPLAY_POLL_FDS + AUDIO_MAX_POLL_FDS]posix.pollfd
+		poll_fds := mem.buffer_from_slice(poll_fds_buf[:])
 
-		#assert(DISPLAY_POLL_FDS == 1)
-		poll_fds[0] = display_get_poll_descriptor(&state.display) or_break
+		append(&poll_fds, display_get_poll_descriptor(&state.display) or_break)
 		display_poll := &poll_fds[0]
-		nfds += DISPLAY_POLL_FDS
 
-		// TODO: Don't break in case of failures?
-		audio_nfds := audio_get_poll_descriptor_count(&state.audio) or_break
-		audio_poll := poll_fds[nfds:][:audio_nfds]
-		audio_get_poll_descriptors(&state.audio, audio_poll) or_break
-		nfds += audio_nfds
+		// TODO: Don't break in case of audio-related failures to consider non-critital?
+		// audio_nfds := audio_get_poll_descriptor_count(&state.audio) or_break
+		// audio_poll := poll_fds[nfds:][:audio_nfds]
+		// audio_get_poll_descriptors(&state.audio, audio_poll) or_break
+		// nfds += audio_nfds
+		audio_poll := audio_append_poll_descriptors(&state.audio, &poll_fds) or_break
 
-		switch poll_res := posix.poll(&poll_fds[0], posix.nfds_t(nfds), -1); poll_res {
+		switch poll_res := posix.poll(&poll_fds[0], posix.nfds_t(len(poll_fds)), -1); poll_res {
 		case 0:
 			// timeout
 			continue loop

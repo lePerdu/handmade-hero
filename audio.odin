@@ -243,6 +243,21 @@ audio_get_poll_descriptors :: proc(state: ^Audio_State, pfds: []posix.pollfd) ->
 	}
 }
 
+audio_append_poll_descriptors :: proc(
+	state: ^Audio_State,
+	pfds: ^[dynamic]posix.pollfd,
+) -> (
+	audio_pfds: []posix.pollfd,
+	ok: bool,
+) {
+	nfds := audio_get_poll_descriptor_count(state) or_return
+	init_len := len(pfds)
+	if err := resize(pfds, init_len + nfds); err != nil do return nil, false
+	audio_pfds = pfds[:init_len][:nfds]
+	audio_get_poll_descriptors(state, audio_pfds) or_return
+	return audio_pfds, true
+}
+
 audio_handle_poll :: proc(state: ^Audio_State, pfds: []posix.pollfd) -> Audio_Error {
 	revents: posix.Poll_Event
 	if err := alsa.pcm_poll_descriptors_revents(state.pcm, &pfds[0], c.uint(len(pfds)), &revents);
