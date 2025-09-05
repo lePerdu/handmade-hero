@@ -3,6 +3,7 @@ package main
 import "core:c"
 import "core:log"
 import "core:math"
+import "core:mem"
 import "core:sys/posix"
 
 import "alsa"
@@ -20,15 +21,10 @@ Frame :: struct #packed {
 }
 
 Audio_State :: struct {
+	game_ref:    ^Game_State,
 	pcm:         alsa.Pcm,
 	buffer_size: alsa.Pcm_Uframes,
 	period_size: alsa.Pcm_Uframes,
-
-	// Sound state
-	freq:        f32,
-	// 0-1
-	amp:         f32,
-	phase:       f32,
 }
 
 Audio_Error :: enum {
@@ -36,7 +32,8 @@ Audio_Error :: enum {
 	Failed,
 }
 
-audio_init :: proc(state: ^Audio_State) -> Audio_Error {
+audio_init :: proc(state: ^Audio_State, game_ref: ^Game_State) -> Audio_Error {
+	state.game_ref = game_ref
 	if err := alsa.pcm_open(&state.pcm, "default", .Playback, .Block); err != 0 {
 		log.error("failed to open audio device:", alsa.strerror(err))
 		return .Failed
@@ -75,71 +72,34 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 	return nil
 }
 
-Dual_Channel_Iterator :: struct {
-	base:              rawptr,
-	step_bytes:        uint,
-	init_frame_offset: uint,
-	init_frame_space:  uint,
-	// Frames written
-	frame_count:       uint,
-}
-
-dual_channel_iterator :: proc(
+get_audio_buffer :: proc(
 	buffer_size: alsa.Pcm_Uframes,
 	area: ^alsa.Pcm_Channel_Area,
 	offset: alsa.Pcm_Uframes,
 	space: alsa.Pcm_Uframes,
 ) -> (
-	iter: Dual_Channel_Iterator,
+	buf: []Audio_Frame,
 	ok: bool,
 ) {
+	// TODO: Add more generic Audio_Buffer type if first and step have padding
 	// TODO: Just assert?
-	if area.first % 8 != 0 {
+	if area.first != 0 {
 		log.errorf("channel offset not byte-aligned: first_bits={}", area.first)
 		return
 	}
-	if area.step % size_of(Frame) != 0 {
+	if area.step != 8 * size_of(Audio_Frame) {
 		log.errorf("channel offset not Frame: step_bits={}", area.step)
 		return
 	}
 
-	iter.base = rawptr(uintptr(area.addr) + uintptr(area.first / 8))
-	iter.step_bytes = uint(area.step / 8)
-	iter.init_frame_offset = uint(offset)
-	iter.init_frame_space = uint(space)
 	// Make sure the API doesn't expect me to handle wrap-around
-	assert(alsa.Pcm_Uframes(iter.init_frame_offset + iter.init_frame_space) <= buffer_size)
-	ok = true
-	return
+	assert(offset + space <= buffer_size)
+
+	full_buffer := mem.slice_ptr((^Audio_Frame)(area.addr), int(buffer_size))
+	return full_buffer[offset:][:space], true
 }
 
-dual_channel_next :: proc(iter: ^Dual_Channel_Iterator) -> (^Frame, uint, bool) {
-	if iter.frame_count == iter.init_frame_space {
-		return nil, 0, false
-	}
-
-	frame_offset := iter.init_frame_offset + iter.frame_count
-	byte_offset := frame_offset * iter.step_bytes
-	ptr := (^Frame)(uintptr(iter.base) + uintptr(byte_offset))
-	iter.frame_count += 1
-	return ptr, frame_offset, true
-}
-
-generate_sine :: proc(frame_iter: ^Dual_Channel_Iterator, freq: f32, amp: f32, phase: ^f32) {
-	sample_amp := f32(max(i16)) * amp
-	dt := math.TAU / SAMPLE_RATE * freq
-
-	t: f32 = phase^
-	for frame, index in dual_channel_next(frame_iter) {
-		sample := sample_amp * math.sin(t)
-		frame^ = {i16(sample), i16(sample)}
-		t += dt
-		if t > math.TAU do t -= math.TAU
-	}
-	phase^ = t
-}
-
-audio_write_sine_wave :: proc(state: ^Audio_State) -> Audio_Error {
+audio_fill_buffer :: proc(state: ^Audio_State) -> Audio_Error {
 	// Loop until "would block"
 	audio_loop: for {
 		need_start: bool
@@ -184,10 +144,10 @@ audio_write_sine_wave :: proc(state: ^Audio_State) -> Audio_Error {
 			return .Failed
 		}
 
-		frame_iter, ok := dual_channel_iterator(state.buffer_size, area, offset, space)
+		frame_buf, ok := get_audio_buffer(state.buffer_size, area, offset, space)
 		if !ok do return .Failed
 
-		generate_sine(&frame_iter, freq = state.freq, amp = state.amp, phase = &state.phase)
+		render_audio(state.game_ref, frame_buf)
 
 		if err := alsa.pcm_mmap_commit(state.pcm, offset, space); err < 0 {
 			log.error("failed to commit mmap area:", alsa.strerror(i32(err)))
@@ -267,8 +227,7 @@ audio_handle_poll :: proc(state: ^Audio_State, pfds: []posix.pollfd) -> Audio_Er
 	}
 
 	if .OUT in revents {
-		log.info("audio events:", revents)
-		return audio_write_sine_wave(state)
+		return audio_fill_buffer(state)
 	}
 	return nil
 }

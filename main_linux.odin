@@ -5,30 +5,31 @@ import "core:log"
 import "core:mem"
 import "core:os"
 import "core:sys/posix"
-import "core:time"
 
 import "wayland"
 
-Game_State :: struct {
+State :: struct {
+	game:    Game_State,
 	display: Display_State,
 	audio:   Audio_State,
 }
 
 main :: proc() {
-	context.logger = log.create_console_logger(lowest = .Debug)
+	context.logger = log.create_console_logger(lowest = .Info)
 
-	state: Game_State
+	state: State
 
-	if !display_init(&state.display) do os.exit(1)
+	if !display_init(&state.display, &state.game) do os.exit(1)
 
-	if audio_init(&state.audio) != nil do os.exit(1)
-	state.audio.freq = 420.0
+	if audio_init(&state.audio, &state.game) != nil do os.exit(1)
+
+	state.game.freq = 440
 	// defer audio_destroy(&state.audio)
 
 	game_loop(&state)
 }
 
-game_loop :: proc(state: ^Game_State) {
+game_loop :: proc(state: ^State) {
 	last_loop_ns: i64
 
 	loop: for !state.display.close_requested {
@@ -65,9 +66,10 @@ game_loop :: proc(state: ^Game_State) {
 
 		display_handle_poll(&state.display, display_poll) or_break
 
+		// TODO: Figure out API for handling input
 		// TODO: Figure out how to make the audio stream update "immediately"
 		// I guess it needs to be "drop"ed and re-filled?
-		state.audio.amp = state.display.key_states[.Space] ? 0.2 : 0.0
+		state.game.play_sound = state.display.key_states[.Space]
 
 		audio_handle_poll(&state.audio, audio_poll) or_break
 

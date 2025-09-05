@@ -28,6 +28,7 @@ Key :: enum {
 Key_State :: bool
 
 Display_State :: struct {
+	game_ref:        ^Game_State,
 	conn:            wayland.Connection,
 
 	// Static IDs
@@ -40,7 +41,7 @@ Display_State :: struct {
 	wl_shm:          wayland.Wl_Shm,
 	xdg_wm_base:     wayland.Xdg_Wm_Base,
 
-	// SHM-related data
+	// SHM-related data (pointed is tracked in frame_buffer)
 	shm_fd:          posix.FD,
 	shm_data:        []u8,
 	// TODO: Do these need to be persistend long-term?
@@ -51,8 +52,6 @@ Display_State :: struct {
 	wl_buffer:       wayland.Wl_Buffer,
 	xdg_surface:     wayland.Xdg_Surface,
 	xdg_toplevel:    wayland.Xdg_Toplevel,
-	width:           u32,
-	height:          u32,
 	surface_state:   Surface_State,
 	close_requested: bool,
 
@@ -62,6 +61,7 @@ Display_State :: struct {
 	key_states:      [Key]Key_State,
 
 	// Frame state
+	frame_buffer:    Frame_Buffer,
 	frame_callback:  wayland.Wl_Callback,
 	last_frame_time: u32,
 	x_offset:        f32,
@@ -76,7 +76,8 @@ Surface_State :: enum {
 	Configured,
 }
 
-display_init :: proc(state: ^Display_State) -> bool {
+display_init :: proc(state: ^Display_State, game_ref: ^Game_State) -> bool {
+	state.game_ref = game_ref
 	if err := wayland.connection_init(&state.conn); err != nil {
 		log.fatal("failed to setup connection:", err)
 		return false
@@ -93,17 +94,21 @@ display_init :: proc(state: ^Display_State) -> bool {
 	}
 
 	// TODO: I guess this needs to be re-created when the window is?
-	state.width = 640
-	state.height = 480
+	state.frame_buffer.width = 640
+	state.frame_buffer.height = 480
+	state.frame_buffer.stride = state.frame_buffer.width * COLOR_CHANNELS
+
 	shm_err: Shm_Error
+	shm_data: []u8
 	state.shm_fd, state.shm_data, shm_err = create_shm_file(
-		uint(state.width * state.height) * COLOR_CHANNELS,
+		uint(state.frame_buffer.stride * state.frame_buffer.height),
 	)
 	if shm_err != nil {
 		log.fatal("failed to create SHM file:", posix.strerror())
 	}
+	state.frame_buffer.base = &state.shm_data[0]
 
-	render(state)
+	render(state.game_ref, state.frame_buffer)
 
 	// Initial setup event loop to bind to globals
 	for state.wl_compositor == 0 || state.wl_shm == 0 || state.xdg_wm_base == 0 {
@@ -147,11 +152,11 @@ display_init :: proc(state: ^Display_State) -> bool {
 	state.wl_buffer, _ = wayland.wl_shm_pool_create_buffer(
 		&state.conn,
 		state.wl_shm_pool,
-		0,
-		i32(state.width),
-		i32(state.height),
-		i32(state.width * COLOR_CHANNELS),
-		.Xrgb8888,
+		offset = 0,
+		width = i32(state.frame_buffer.width),
+		height = i32(state.frame_buffer.height),
+		stride = i32(state.frame_buffer.stride),
+		format = .Xrgb8888,
 	)
 	// TODO: Destroy wl_shm_pool after buffers are created
 	_ = wayland.wl_surface_attach(&state.conn, state.wl_surface, state.wl_buffer, 0, 0)
@@ -170,29 +175,9 @@ display_get_poll_descriptor :: proc(state: ^Display_State) -> (poll: posix.pollf
 
 display_handle_poll :: proc(state: ^Display_State, poll: ^posix.pollfd) -> (ok: bool) {
 	if poll.revents & {.IN, .OUT} == {} do return true
-	log.info("display events:", poll.revents)
 	process_wayland_messages(state)
 	if state.key_states[.Esc] do state.close_requested = true
 	return true
-}
-
-Pixel :: u32
-make_pixel :: proc(r, g, b: u8) -> Pixel {
-	return u32(r) << 16 | u32(g) << 8 | u32(b)
-}
-
-render :: proc(state: ^Display_State) {
-	fb := state.shm_data
-	stride := state.width * COLOR_CHANNELS
-	x_offset := u32(state.x_offset)
-	y_offset := u32(state.y_offset)
-	for y in 0 ..< state.height {
-		row_ptr := mem.slice_ptr(cast(^Pixel)(&fb[y * stride]), int(state.width))
-		for x in 0 ..< state.width {
-			// TODO: Is casting to u8 the "proper" way to wrap?
-			row_ptr[x] = make_pixel(0, u8(y + y_offset), u8(x + x_offset))
-		}
-	}
 }
 
 draw :: proc(state: ^Display_State) {
@@ -527,7 +512,7 @@ handle_frame_callback :: proc(state: ^Display_State, event: wayland.Wl_Callback_
 	state.x_offset += f32(dt_ms) * x_rate
 	state.y_offset += f32(dt_ms) * y_rate
 
-	render(state)
+	render(state.game_ref, state.frame_buffer)
 	draw(state)
 }
 
