@@ -6,7 +6,7 @@ import "core:math"
 import "core:mem"
 import "core:sys/posix"
 
-import "alsa"
+import "vendor/alsa"
 
 SAMPLE_RATE :: 48000
 BUF_DURATION_SEC :: 2

@@ -6,8 +6,6 @@ import "core:mem"
 import "core:os"
 import "core:sys/posix"
 
-import "wayland"
-
 State :: struct {
 	game:    Game_State,
 	display: Display_State,

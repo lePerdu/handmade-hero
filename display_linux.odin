@@ -7,7 +7,7 @@ import "core:path/filepath"
 import "core:strings"
 import "core:sys/posix"
 
-import "wayland"
+import "vendor/wayland"
 
 DISPLAY_POLL_FDS :: 1
 
