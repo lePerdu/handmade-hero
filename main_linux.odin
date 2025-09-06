@@ -32,8 +32,6 @@ game_loop :: proc(state: ^State) {
 	last_frame_time: i64
 	last_loop_ns: i64
 
-	x_offset, y_offset: f32
-
 	loop: for !state.display.close_requested {
 		counter_start_wall_ns := get_perf_counter_wall_ns()
 		counter_start_cpu_ns := get_perf_counter_cpu_ns()
@@ -67,33 +65,23 @@ game_loop :: proc(state: ^State) {
 		}
 
 		display_handle_poll(&state.display, display_poll) or_break
-
-		// TODO: Figure out API for handling input
-		// TODO: Figure out how to make the audio stream update "immediately"
-		// I guess it needs to be "drop"ed and re-filled?
-		state.audio.play_sound = state.display.key_states[.Space]
+		if button_input_press_count(state.display.keyboard_input[.Esc]) > 0 {
+			break
+		}
 
 		frame_time := get_perf_counter_wall_ns()
 		dt_ns := frame_time - last_frame_time
 		last_frame_time = frame_time
 
-		// rate=24p/s
-		rate: f32 : 24.0
-		x_rate: f32 = 0.0
-		y_rate: f32 = 0.0
-
-		// Use +=/-= so that pressing 2 directions at the same time cancels out
-		if state.display.key_states[.W] || state.display.key_states[.UP] do y_rate += rate
-		if state.display.key_states[.A] || state.display.key_states[.Left] do x_rate += rate
-		if state.display.key_states[.S] || state.display.key_states[.Down] do y_rate -= rate
-		if state.display.key_states[.D] || state.display.key_states[.Right] do x_rate -= rate
-		x_offset += f32(dt_ns) * x_rate / 1_000_000_000.0
-		y_offset += f32(dt_ns) * y_rate / 1_000_000_000.0
-
-		game_render(state.display.frame_buffer, int(x_offset), int(y_offset))
+		// TODO: Don't need to the state every time
+		input := Game_Input{state.display.keyboard_input}
+		game_render(state.display.frame_buffer, input, dt_ns)
 		draw(&state.display)
 
-		audio_handle_poll(&state.audio, audio_poll) or_break
+		audio_handle_poll(&state.audio, audio_poll, input) or_break
+
+		// Reset after the frame
+		keyboard_input_reset(&state.display.keyboard_input)
 
 		free_all(context.temp_allocator)
 
@@ -116,22 +104,6 @@ game_loop :: proc(state: ^State) {
 import "vendor/wayland"
 
 DISPLAY_POLL_FDS :: 1
-
-// Enum of the keys we care about
-Key :: enum {
-	W,
-	A,
-	S,
-	D,
-	UP,
-	Left,
-	Right,
-	Down,
-	Space,
-	Esc,
-}
-
-Key_State :: bool
 
 Display_State :: struct {
 	conn:            wayland.Connection,
@@ -162,8 +134,7 @@ Display_State :: struct {
 
 	// Input
 	wl_keyboard:     wayland.Wl_Keyboard,
-	// TODO: Use bit_array?
-	key_states:      [Key]Key_State,
+	keyboard_input:  Keyboard_Input,
 
 	// Frame state
 	frame_buffer:    Frame_Buffer,
@@ -273,7 +244,6 @@ display_get_poll_descriptor :: proc(state: ^Display_State) -> (poll: posix.pollf
 display_handle_poll :: proc(state: ^Display_State, poll: ^posix.pollfd) -> (ok: bool) {
 	if poll.revents & {.IN, .OUT} == {} do return true
 	process_wayland_messages(state)
-	if state.key_states[.Esc] do state.close_requested = true
 	return true
 }
 
@@ -536,51 +506,54 @@ handle_keyboard_keymap :: proc(state: ^Display_State, event: wayland.Wl_Keyboard
 	if event.fd > 0 do posix.close(event.fd)
 }
 
-set_scan_code_state :: proc(state: ^Display_State, scan_code: u32, pressed: bool) {
-	key: Maybe(Key) = nil
-	switch scan_code {
+scancode_to_key :: proc(code: u32) -> (Key, bool) {
+	switch code {
 	case KEY_W:
-		key = .W
+		return .W, true
 	case KEY_A:
-		key = .A
+		return .A, true
 	case KEY_S:
-		key = .S
+		return .S, true
 	case KEY_D:
-		key = .D
+		return .D, true
 	case KEY_UP:
-		key = .UP
+		return .UP, true
 	case KEY_LEFT:
-		key = .Left
+		return .Left, true
 	case KEY_DOWN:
-		key = .Down
+		return .Down, true
 	case KEY_RIGHT:
-		key = .Right
+		return .Right, true
 	case KEY_SPACE:
-		key = .Space
+		return .Space, true
 	case KEY_ESC:
-		key = .Esc
+		return .Esc, true
+	case:
+		return {}, false
 	}
-	if k, ok := key.?; ok do state.key_states[k] = pressed
 }
 
 handle_keyboard_enter :: proc(state: ^Display_State, event: wayland.Wl_Keyboard_Enter_Event) {
 	scan_codes := mem.slice_data_cast([]u32, event.keys)
-	// Everything is un-pressed
-	for _, index in state.key_states {
-		state.key_states[index] = false
-	}
 	for code in scan_codes {
-		set_scan_code_state(state, code, true)
+		if k, ok := scancode_to_key(code); ok {
+			button_input_update(&state.keyboard_input[k], pressed = true)
+		}
 	}
 }
 
 handle_keyboard_leave :: proc(state: ^Display_State, event: wayland.Wl_Keyboard_Leave_Event) {
-	// TODO: Reset key states here isntead of in enter?
+	// Releasing all keys when un-focusing makes logic in `enter` easiest
+	for &key in state.keyboard_input {
+		button_input_update(&key, pressed = false)
+	}
 }
 
 handle_keyboard_key :: proc(state: ^Display_State, event: wayland.Wl_Keyboard_Key_Event) {
 	// TODO: Track event time?
-	set_scan_code_state(state, event.key, event.state == .Pressed)
+	if k, ok := scancode_to_key(event.key); ok {
+		button_input_update(&state.keyboard_input[k], pressed = event.state == .Pressed)
+	}
 }
 
 handle_keyboard_modifiers :: proc(
@@ -645,7 +618,6 @@ Audio_State :: struct {
 	pcm:         alsa.Pcm,
 	buffer_size: alsa.Pcm_Uframes,
 	period_size: alsa.Pcm_Uframes,
-	play_sound:  bool,
 }
 
 Audio_Error :: enum {
@@ -719,7 +691,7 @@ get_audio_buffer :: proc(
 	return full_buffer[offset:][:space], true
 }
 
-audio_fill_buffer :: proc(state: ^Audio_State) -> Audio_Error {
+audio_fill_buffer :: proc(state: ^Audio_State, input: Game_Input) -> Audio_Error {
 	// Loop until "would block"
 	audio_loop: for {
 		need_start: bool
@@ -767,7 +739,7 @@ audio_fill_buffer :: proc(state: ^Audio_State) -> Audio_Error {
 		frame_buf, ok := get_audio_buffer(state.buffer_size, area, offset, space)
 		if !ok do return .Failed
 
-		game_render_audio(frame_buf, state.play_sound)
+		game_render_audio(frame_buf, input)
 
 		if err := alsa.pcm_mmap_commit(state.pcm, offset, space); err < 0 {
 			log.error("failed to commit mmap area:", alsa.strerror(i32(err)))
@@ -838,7 +810,11 @@ audio_append_poll_descriptors :: proc(
 	return audio_pfds, true
 }
 
-audio_handle_poll :: proc(state: ^Audio_State, pfds: []posix.pollfd) -> Audio_Error {
+audio_handle_poll :: proc(
+	state: ^Audio_State,
+	pfds: []posix.pollfd,
+	input: Game_Input,
+) -> Audio_Error {
 	revents: posix.Poll_Event
 	if err := alsa.pcm_poll_descriptors_revents(state.pcm, &pfds[0], c.uint(len(pfds)), &revents);
 	   err != 0 {
@@ -847,7 +823,7 @@ audio_handle_poll :: proc(state: ^Audio_State, pfds: []posix.pollfd) -> Audio_Er
 	}
 
 	if .OUT in revents {
-		return audio_fill_buffer(state)
+		return audio_fill_buffer(state, input)
 	}
 	return nil
 }
