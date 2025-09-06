@@ -25,8 +25,6 @@ main :: proc() {
 
 	if audio_init(&state.audio) != nil do os.exit(1)
 
-	state.audio.freq = 440
-
 	game_loop(&state)
 }
 
@@ -92,7 +90,7 @@ game_loop :: proc(state: ^State) {
 		x_offset += f32(dt_ns) * x_rate / 1_000_000_000.0
 		y_offset += f32(dt_ns) * y_rate / 1_000_000_000.0
 
-		game_update_and_render(state.display.frame_buffer, int(x_offset), int(y_offset))
+		game_render(state.display.frame_buffer, int(x_offset), int(y_offset))
 		draw(&state.display)
 
 		audio_handle_poll(&state.audio, audio_poll) or_break
@@ -640,16 +638,14 @@ SAMPLE_RATE :: 48000
 BUF_DURATION_SEC :: 2
 BUF_FRAME_COUNT :: BUF_DURATION_SEC * SAMPLE_RATE
 
-// 15 FPS
-LATENCY_US :: 1_000_000 / 15
+// 30 FPS
+LATENCY_US :: 1_000_000 / 30
 
 Audio_State :: struct {
 	pcm:         alsa.Pcm,
 	buffer_size: alsa.Pcm_Uframes,
 	period_size: alsa.Pcm_Uframes,
-	freq:        f32,
 	play_sound:  bool,
-	phase:       f32,
 }
 
 Audio_Error :: enum {
@@ -723,30 +719,6 @@ get_audio_buffer :: proc(
 	return full_buffer[offset:][:space], true
 }
 
-
-Audio_Frame :: struct #packed {
-	l: i16,
-	r: i16,
-}
-
-generate_sine :: proc(frame_buf: []Audio_Frame, freq: f32, amp: f32, phase: ^f32) {
-	sample_amp := f32(max(i16)) * amp
-	dt := math.TAU / SAMPLE_RATE * freq
-
-	t: f32 = phase^
-	for _, index in frame_buf {
-		sample := sample_amp * math.sin(t)
-		frame_buf[index] = {i16(sample), i16(sample)}
-		t += dt
-		if t > math.TAU do t -= math.TAU
-	}
-	phase^ = t
-}
-
-render_audio :: proc(frame_buf: []Audio_Frame, freq: f32, play_sound: bool, phase: ^f32) {
-	generate_sine(frame_buf, freq = freq, amp = play_sound ? 1.0 : 0.0, phase = phase)
-}
-
 audio_fill_buffer :: proc(state: ^Audio_State) -> Audio_Error {
 	// Loop until "would block"
 	audio_loop: for {
@@ -795,7 +767,7 @@ audio_fill_buffer :: proc(state: ^Audio_State) -> Audio_Error {
 		frame_buf, ok := get_audio_buffer(state.buffer_size, area, offset, space)
 		if !ok do return .Failed
 
-		render_audio(frame_buf, state.freq, state.play_sound, &state.phase)
+		game_render_audio(frame_buf, state.play_sound)
 
 		if err := alsa.pcm_mmap_commit(state.pcm, offset, space); err < 0 {
 			log.error("failed to commit mmap area:", alsa.strerror(i32(err)))
