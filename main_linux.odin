@@ -57,11 +57,20 @@ game_loop :: proc(state: ^State) {
 		return
 	}
 
-	display_setup_first_frame(&state.display)
-
 	last_loop_ns: i64
 	last_update_time_ns: i64 = get_perf_counter_cpu_ns()
 	last_render_time_ns: i64 = -1
+
+	if fb, ok := display_get_back_buffer(&state.display); ok {
+		game_render(&state.game, fb)
+		display_submit_first_frame(&state.display)
+	} else {
+		log.error(
+			"back buffer not ready for initial rendering:",
+			state.display.buffers[state.display.back_buffer_index].wl_buffer,
+		)
+		return
+	}
 
 	loop: for !state.display.close_requested {
 		counter_start_wall_ns := get_perf_counter_wall_ns()
@@ -108,9 +117,24 @@ game_loop :: proc(state: ^State) {
 			last_update_time_ns = now
 		}
 
+		// Only render after the previous frame is presented
+		// TODO: Render at a fixed rate even if some frames won't be presented?
 		if state.display.last_frame_time_ns > last_render_time_ns {
-			game_render(&state.game, state.display.frame_buffers[state.display.back_buffer_index])
-			last_render_time_ns = state.display.last_frame_time_ns
+			if fb, ok := display_get_back_buffer(&state.display); ok {
+				game_render(&state.game, fb)
+				// TODO: Fix/remove time for first frame, since it is incorrect
+				log.debugf(
+					"time between frame renders: {}ms",
+					f64(state.display.last_frame_time_ns - last_render_time_ns) / 1_000_000.0,
+				)
+				last_render_time_ns = state.display.last_frame_time_ns
+				display_submit_frame(&state.display)
+			} else {
+				log.warn(
+					"back buffer not ready for rendering:",
+					state.display.buffers[state.display.back_buffer_index].wl_buffer,
+				)
+			}
 		}
 
 		audio_handle_poll(state, audio_poll_fds) or_break
@@ -136,45 +160,57 @@ import "vendor/wayland"
 
 BUFFER_COUNT :: 2
 
+Buffer_State :: enum {
+	// Ready to render into
+	Free,
+	// In-use by the compositor and shouldn't be touched
+	Attached,
+}
+
+Display_Buffer :: struct {
+	wl_buffer:    wayland.Wl_Buffer,
+	state:        Buffer_State,
+	frame_buffer: Frame_Buffer,
+}
+
 Display_State :: struct {
-	conn:               wayland.Connection,
+	conn:                 wayland.Connection,
 
 	// Static IDs
-	wl_display:         wayland.Wl_Display,
-	wl_registry:        wayland.Wl_Registry,
+	wl_display:           wayland.Wl_Display,
+	wl_registry:          wayland.Wl_Registry,
 
 	// Bound IDs from the registry
-	wl_compositor:      wayland.Wl_Compositor,
-	wl_seat:            wayland.Wl_Seat,
-	wl_shm:             wayland.Wl_Shm,
-	xdg_wm_base:        wayland.Xdg_Wm_Base,
+	wl_compositor:        wayland.Wl_Compositor,
+	wl_seat:              wayland.Wl_Seat,
+	wl_shm:               wayland.Wl_Shm,
+	xdg_wm_base:          wayland.Xdg_Wm_Base,
 
 	// SHM-related data (pointed is tracked in frame_buffer)
-	shm_fd:             posix.FD,
-	shm_data:           []u8,
+	shm_fd:               posix.FD,
+	shm_data:             []u8,
 	// TODO: Do these need to be persistend long-term?
-	wl_shm_pool:        wayland.Wl_Shm_Pool,
+	wl_shm_pool:          wayland.Wl_Shm_Pool,
 
 	// Window-related objects and data
-	wl_surface:         wayland.Wl_Surface,
-	wl_buffers:         [BUFFER_COUNT]wayland.Wl_Buffer,
-	xdg_surface:        wayland.Xdg_Surface,
-	xdg_toplevel:       wayland.Xdg_Toplevel,
-	surface_state:      Surface_State,
-	close_requested:    bool,
-
+	wl_surface:           wayland.Wl_Surface,
+	xdg_surface:          wayland.Xdg_Surface,
+	xdg_toplevel:         wayland.Xdg_Toplevel,
+	xdg_configure_serial: Maybe(u32),
+	surface_state:        Surface_State,
+	close_requested:      bool,
+	buffers:              [BUFFER_COUNT]Display_Buffer,
 	// Index of the buffer which should be used to render the next frame
-	back_buffer_index:  int,
+	back_buffer_index:    int,
 
 	// Input
-	wl_keyboard:        wayland.Wl_Keyboard,
-	keyboard_input:     Keyboard_Input,
+	wl_keyboard:          wayland.Wl_Keyboard,
+	keyboard_input:       Keyboard_Input,
 
 	// Frame state
-	frame_buffers:      [BUFFER_COUNT]Frame_Buffer,
-	frame_callback:     wayland.Wl_Callback,
-	frame_rate_ns:      i64,
-	last_frame_time_ns: i64,
+	frame_callback:       wayland.Wl_Callback,
+	frame_rate_ns:        i64,
+	last_frame_time_ns:   i64,
 }
 
 COLOR_CHANNELS :: 4
@@ -248,9 +284,11 @@ display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
 	// TODO: Re-use current SHM allocation when possible
 	// TODO: Look into wl_shm_pool_resize when growing the pool
 
-	for buf in state.wl_buffers {
-		if buf != wayland.OBJECT_ID_NIL {
-			_ = wayland.wl_buffer_destroy(&state.conn, buf)
+	for buf in state.buffers {
+		if buf.wl_buffer != wayland.OBJECT_ID_NIL {
+			// TODO: Should destroying the buffer wait until the buffer is released?
+			// That could get tricky since events are async...
+			_ = wayland.wl_buffer_destroy(&state.conn, buf.wl_buffer)
 		}
 	}
 	if state.wl_shm_pool != wayland.OBJECT_ID_NIL {
@@ -265,12 +303,6 @@ display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
 		log.fatal("failed to create SHM file:", posix.strerror())
 		return
 	}
-	for &fb, i in state.frame_buffers {
-		fb.width = width
-		fb.height = height
-		fb.stride = stride
-		fb.base = &state.shm_data[i * int(buffer_size)]
-	}
 
 	state.wl_shm_pool, _ = wayland.wl_shm_create_pool(
 		&state.conn,
@@ -278,27 +310,45 @@ display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
 		state.shm_fd,
 		i32(len(state.shm_data)),
 	)
-	for &buf, i in state.wl_buffers {
-		buf, _ = wayland.wl_shm_pool_create_buffer(
+	for &buf, i in state.buffers {
+		offset := i * int(buffer_size)
+		buf.frame_buffer.width = width
+		buf.frame_buffer.height = height
+		buf.frame_buffer.stride = stride
+		buf.frame_buffer.base = &state.shm_data[offset]
+
+		buf.wl_buffer, _ = wayland.wl_shm_pool_create_buffer(
 			&state.conn,
 			state.wl_shm_pool,
-			offset = i32(i * int(buffer_size)),
+			offset = i32(offset),
 			width = i32(width),
 			height = i32(height),
 			stride = i32(stride),
 			format = .Xrgb8888,
 		)
+		buf.state = .Free
 	}
 
-	// Attach one of the new, valid buffers
+	state.back_buffer_index = 0
+
+	// Attach one of the new, valid buffers, but don't commit yet since the buffer isn't written
 	// TODO: Will this result in blank frames when resizing?
 	_ = wayland.wl_surface_attach(
 		&state.conn,
 		state.wl_surface,
-		state.wl_buffers[state.back_buffer_index],
+		state.buffers[state.back_buffer_index].wl_buffer,
 		0,
 		0,
 	)
+}
+
+display_get_back_buffer :: proc(state: ^Display_State) -> (fb: Frame_Buffer, ok: bool) {
+	b := &state.buffers[state.back_buffer_index]
+	if b.state == .Attached {
+		return {}, false
+	} else {
+		return b.frame_buffer, true
+	}
 }
 
 display_get_poll_descriptor :: proc(state: ^Display_State) -> (poll: posix.pollfd, ok: bool) {
@@ -319,18 +369,25 @@ display_handle_poll :: proc(state: ^Display_State, poll: ^posix.pollfd) -> (ok: 
 
 // Submit the current frame, rendered in the back-buffer, and swap buffers to
 // prepare for the next frame
-submit_frame :: proc(state: ^Display_State) {
-	wayland.wl_surface_attach(
-		&state.conn,
-		state.wl_surface,
-		state.wl_buffers[state.back_buffer_index],
-		0,
-		0,
-	)
+display_submit_frame :: proc(state: ^Display_State) {
+	back_buffer := &state.buffers[state.back_buffer_index]
+
+	wayland.wl_surface_attach(&state.conn, state.wl_surface, back_buffer.wl_buffer, 0, 0)
 	wayland.wl_surface_damage_buffer(&state.conn, state.wl_surface, 0, 0, max(i32), max(i32))
+
+	if serial, ok := state.xdg_configure_serial.?; ok {
+		_ = wayland.xdg_surface_ack_configure(&state.conn, state.xdg_surface, serial)
+		state.xdg_configure_serial = nil
+	}
 	wayland.wl_surface_commit(&state.conn, state.wl_surface)
+	back_buffer.state = .Attached
 
 	state.back_buffer_index = (state.back_buffer_index + 1) % BUFFER_COUNT
+}
+
+display_submit_first_frame :: proc(state: ^Display_State) {
+	request_frame_callback(state)
+	display_submit_frame(state)
 }
 
 process_wayland_messages :: proc(state: ^Display_State) {
@@ -485,12 +542,13 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 			return nil
 		}
 	}
-	for buf in state.wl_buffers {
-		if message.header.target == buf {
+	for buf, i in state.buffers {
+		if message.header.target == buf.wl_buffer {
 			switch opcode {
 			case wayland.WL_BUFFER_RELEASE_EVENT_OPCODE:
 				handle_buffer_release(
 					state,
+					i,
 					wayland.wl_buffer_release_parse(&state.conn, message) or_return,
 				)
 				return nil
@@ -551,9 +609,7 @@ handle_xdg_surface_configure :: proc(
 	state: ^Display_State,
 	event: wayland.Xdg_Surface_Configure_Event,
 ) {
-	// TODO: Should drawing happen here instead?
-	_ = wayland.xdg_surface_ack_configure(&state.conn, state.xdg_surface, event.serial)
-	_ = wayland.wl_surface_commit(&state.conn, state.wl_surface)
+	state.xdg_configure_serial = event.serial
 }
 
 handle_xdg_toplevel_configure :: proc(
@@ -585,20 +641,17 @@ handle_frame_callback :: proc(state: ^Display_State, event: wayland.Wl_Callback_
 	} else {
 		frame_dt_ns = frame_time_ns - state.last_frame_time_ns
 	}
-	log.debugf("frame: {}ms", f64(frame_dt_ns) / 1_000_000.0)
+	log.debugf("frame flip: {}ms", f64(frame_dt_ns) / 1_000_000.0)
 
 	state.last_frame_time_ns = frame_time_ns
-
-	submit_frame(state)
 }
 
-display_setup_first_frame :: proc(state: ^Display_State) {
-	request_frame_callback(state)
-}
-
-handle_buffer_release :: proc(state: ^Display_State, event: wayland.Wl_Buffer_Release_Event) {
-	// TODO: Is there anything to do here?
-	// With double-buffering, this seems irrelevant
+handle_buffer_release :: proc(
+	state: ^Display_State,
+	buffer_index: int,
+	event: wayland.Wl_Buffer_Release_Event,
+) {
+	state.buffers[buffer_index].state = .Free
 }
 
 handle_xdg_toplevel_close :: proc(state: ^Display_State, event: wayland.Xdg_Toplevel_Close_Event) {
