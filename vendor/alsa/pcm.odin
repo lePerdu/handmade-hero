@@ -2,6 +2,7 @@ package alsa
 
 // Incomplete bindings for alsa-lib PCM (mostly just what I needed)
 
+import "base:runtime"
 import "core:c"
 import "core:sys/posix"
 
@@ -192,23 +193,68 @@ foreign asound {
 	@(link_prefix = "snd_")
 	pcm_set_params :: proc(pcm: Pcm, format: Pcm_Format, access: Pcm_Access, channels: c.uint, rate: c.uint, soft_resample: Pcm_Resample, latency: c.uint) -> c.int ---
 
+	// HW Params
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_sizeof :: proc() -> c.size_t ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_any :: proc(pcm: Pcm, params: Pcm_Hw_Params) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params :: proc(pcm: Pcm, params: Pcm_Hw_Params) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_set_access :: proc(pcm: Pcm, params: Pcm_Hw_Params, access: Pcm_Access) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_set_channels :: proc(pcm: Pcm, params: Pcm_Hw_Params, val: c.uint) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_set_format :: proc(pcm: Pcm, params: Pcm_Hw_Params, format: Pcm_Format) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_set_rate_near :: proc(pcm: Pcm, params: Pcm_Hw_Params, val: ^c.uint, dir: ^c.int) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_set_rate_resample :: proc(pcm: Pcm, params: Pcm_Hw_Params, val: Pcm_Resample) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_set_period_time_near :: proc(pcm: Pcm, params: Pcm_Hw_Params, val: ^c.uint, dir: ^c.int) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_set_buffer_time_near :: proc(pcm: Pcm, params: Pcm_Hw_Params, val: ^c.uint, dir: ^c.int) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_get_period_size :: proc(params: Pcm_Hw_Params, val: ^Pcm_Uframes) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_get_buffer_size :: proc(params: Pcm_Hw_Params, val: ^Pcm_Uframes) -> c.int ---
+
+	// SW Params
+
 	@(link_prefix = "snd_")
 	pcm_sw_params_sizeof :: proc() -> c.size_t ---
 
 	@(link_prefix = "snd_")
-	pcm_sw_params_current :: proc(pcm: Pcm, params: ^Pcm_Sw_Params) -> c.int ---
+	pcm_sw_params_current :: proc(pcm: Pcm, params: Pcm_Sw_Params) -> c.int ---
 
 	@(link_prefix = "snd_")
-	pcm_sw_params :: proc(pcm: Pcm, params: ^Pcm_Sw_Params) -> c.int ---
+	pcm_sw_params :: proc(pcm: Pcm, params: Pcm_Sw_Params) -> c.int ---
 
 	@(link_prefix = "snd_")
-	pcm_sw_params_set_start_threshold :: proc(pcm: Pcm, params: ^Pcm_Sw_Params, val: Pcm_Uframes) -> c.int ---
+	pcm_sw_params_set_avail_min :: proc(pcm: Pcm, params: Pcm_Sw_Params, val: Pcm_Uframes) -> c.int ---
 
 	@(link_prefix = "snd_")
-	pcm_sw_params_set_stop_threshold :: proc(pcm: Pcm, params: ^Pcm_Sw_Params, val: Pcm_Uframes) -> c.int ---
+	pcm_sw_params_set_start_threshold :: proc(pcm: Pcm, params: Pcm_Sw_Params, val: Pcm_Uframes) -> c.int ---
 
 	@(link_prefix = "snd_")
-	pcm_sw_params_set_silence_size :: proc(pcm: Pcm, params: ^Pcm_Sw_Params, val: Pcm_Uframes) -> c.int ---
+	pcm_sw_params_set_stop_threshold :: proc(pcm: Pcm, params: Pcm_Sw_Params, val: Pcm_Uframes) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_sw_params_set_silence_size :: proc(pcm: Pcm, params: Pcm_Sw_Params, val: Pcm_Uframes) -> c.int ---
+
+	// Buffer management
 
 	@(link_prefix = "snd_")
 	pcm_writei :: proc(pcm: Pcm, buffer: rawptr, size: Pcm_Uframes) -> Pcm_Sframes ---
@@ -243,36 +289,7 @@ foreign asound {
 	@(link_prefix = "snd_")
 	pcm_wait :: proc(pcm: Pcm, timeout: c.int) -> c.int ---
 
-	// More complex APIs if needed
-	// @(link_prefix = "snd_")
-	// pcm_hw_params_sizeof :: proc() -> c.size_t ---
-
-	// @(link_prefix = "snd_")
-	// pcm_hw_params_any :: proc(pcm: Pcm, params: Pcm_Hw_Params) -> c.int ---
-
-	// @(link_prefix = "snd_")
-	// pcm_hw_params :: proc(pcm: Pcm, params: Pcm_Hw_Params) -> c.int ---
-
-	// @(link_prefix = "snd_")
-	// pcm_hw_params_set_access :: proc(pcm: Pcm, params: Pcm_Hw_Params, access: Pcm_Access) -> c.int ---
-
-	// @(link_prefix = "snd_")
-	// pcm_hw_params_set_channels :: proc(pcm: Pcm, params: Pcm_Hw_Params, val: c.uint) -> c.int ---
-
-	// @(link_prefix = "snd_")
-	// pcm_hw_params_set_format :: proc(pcm: Pcm, params: Pcm_Hw_Params, format: Pcm_Format) -> c.int ---
-
-	// @(link_prefix = "snd_")
-	// pcm_hw_params_set_rate :: proc(pcm: Pcm, params: Pcm_Hw_Params, val: c.uint, dir: c.int) -> c.int ---
-
-	// @(link_prefix = "snd_")
-	// pcm_hw_params_set_rate_resample :: proc(pcm: Pcm, params: Pcm_Hw_Params, val: Pcm_Resample) -> c.int ---
-
-	@(link_prefix = "snd_")
-	pcm_hw_params_get_sbits :: proc(params: Pcm_Hw_Params) -> c.int ---
-
-	@(link_prefix = "snd_")
-	pcm_hw_params_get_buffer_size :: proc(pcm: Pcm, params: Pcm_Hw_Params, val: ^Pcm_Uframes) -> c.int ---
+	// poll() file descriptors
 
 	@(link_prefix = "snd_")
 	pcm_poll_descriptors_count :: proc(pcm: Pcm) -> c.int ---
@@ -282,4 +299,24 @@ foreign asound {
 
 	@(link_prefix = "snd_")
 	pcm_poll_descriptors_revents :: proc(pcm: Pcm, pfds: [^]posix.pollfd, nfds: c.uint, revents: ^posix.Poll_Event) -> c.int ---
+}
+
+pcm_hw_params_alloc :: proc(
+	allocator: runtime.Allocator,
+) -> (
+	params: Pcm_Hw_Params,
+	err: runtime.Allocator_Error,
+) #optional_allocator_error {
+	buf := make([]u8, pcm_hw_params_sizeof(), allocator) or_return
+	return Pcm_Hw_Params(&buf[0]), nil
+}
+
+pcm_sw_params_alloc :: proc(
+	allocator: runtime.Allocator,
+) -> (
+	params: Pcm_Sw_Params,
+	err: runtime.Allocator_Error,
+) #optional_allocator_error {
+	buf := make([]u8, pcm_sw_params_sizeof(), allocator) or_return
+	return Pcm_Sw_Params(&buf[0]), nil
 }

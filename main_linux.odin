@@ -17,7 +17,7 @@ State :: struct {
 }
 
 main :: proc() {
-	context.logger = log.create_console_logger(lowest = .Info)
+	context.logger = log.create_console_logger(lowest = .Debug)
 
 	state: State
 
@@ -57,12 +57,12 @@ game_loop :: proc(state: ^State) {
 		return
 	}
 
-	last_loop_ns: i64
 	last_update_time_ns: i64 = get_perf_counter_cpu_ns()
-	last_render_time_ns: i64 = -1
+	last_render_time_ns: i64
 
 	if fb, ok := display_get_back_buffer(&state.display); ok {
 		game_render(&state.game, fb)
+		last_render_time_ns = get_perf_counter_wall_ns()
 		display_submit_first_frame(&state.display)
 	} else {
 		log.error(
@@ -72,7 +72,7 @@ game_loop :: proc(state: ^State) {
 		return
 	}
 
-	loop: for !state.display.close_requested {
+	for !state.display.close_requested {
 		counter_start_wall_ns := get_perf_counter_wall_ns()
 		counter_start_cpu_ns := get_perf_counter_cpu_ns()
 		counter_start_cpu_cycles := get_perf_counter_cpu_cycles()
@@ -81,7 +81,7 @@ game_loop :: proc(state: ^State) {
 			display_poll_fd^ = poll_fd
 		} else {
 			log.error("failed to setup display file descriptors")
-			break
+			return
 		}
 
 		// Set timeout at next simulation frame boundary in case there are no
@@ -90,14 +90,11 @@ game_loop :: proc(state: ^State) {
 		max_wait_time_ms := i32(
 			max(next_update_time_ns - get_perf_counter_cpu_ns(), 0) / 1_000_000,
 		)
-		switch poll_res := posix.poll(&poll_fds[0], posix.nfds_t(1), max_wait_time_ms); poll_res {
-		case 0:
-			// timeout
-			continue loop
-		case -1:
+		if poll_res := posix.poll(&poll_fds[0], posix.nfds_t(len(poll_fds)), max_wait_time_ms);
+		   poll_res == -1 {
 			// error
 			log.error("failed to poll for updates:", posix.errno())
-			break loop
+			return
 		}
 
 		display_handle_poll(&state.display, display_poll_fd) or_break
@@ -107,13 +104,11 @@ game_loop :: proc(state: ^State) {
 
 		// TODO: Simulate at fixed DT? Would require running this potentially
 		// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
-		now := get_perf_counter_wall_ns()
-		if now >= next_update_time_ns {
+		if now := get_perf_counter_wall_ns(); now >= next_update_time_ns {
 			// TODO: Don't create the Game_Input object every time
 			input := Game_Input{state.display.keyboard_input}
 			game_update(&state.game, input, now - last_update_time_ns)
 			keyboard_input_reset(&state.display.keyboard_input)
-
 			last_update_time_ns = now
 		}
 
@@ -122,12 +117,12 @@ game_loop :: proc(state: ^State) {
 		if state.display.last_frame_time_ns > last_render_time_ns {
 			if fb, ok := display_get_back_buffer(&state.display); ok {
 				game_render(&state.game, fb)
+				last_render_time_ns = get_perf_counter_wall_ns()
 				// TODO: Fix/remove time for first frame, since it is incorrect
 				log.debugf(
-					"time between frame renders: {}ms",
-					f64(state.display.last_frame_time_ns - last_render_time_ns) / 1_000_000.0,
+					"render time: {}ms",
+					f64(last_render_time_ns - state.display.last_frame_time_ns) / 1_000_000.0,
 				)
-				last_render_time_ns = state.display.last_frame_time_ns
 				display_submit_frame(&state.display)
 			} else {
 				log.warn(
@@ -146,7 +141,7 @@ game_loop :: proc(state: ^State) {
 		counter_total_cpu_cycles := get_perf_counter_cpu_cycles() - counter_start_cpu_cycles
 
 		log.debugf(
-			"perf counter: wall={}ms  cpu={}ms  cycles={}K",
+			"event loop perf counter: wall={}ms cpu={}ms cycles={}K",
 			counter_total_wall_ns / 1_000_000,
 			counter_total_cpu_ns / 1_000_000,
 			counter_total_cpu_cycles / 1_000_000,
@@ -211,6 +206,7 @@ Display_State :: struct {
 	frame_callback:       wayland.Wl_Callback,
 	frame_rate_ns:        i64,
 	last_frame_time_ns:   i64,
+	last_cb_time_ms:      u32,
 }
 
 COLOR_CHANNELS :: 4
@@ -227,7 +223,8 @@ display_init :: proc(state: ^Display_State) -> bool {
 		return false
 	}
 
-	// TODO: Query Wayland for this
+	// Guess initial value. Will be set more acurately later on from frame
+	// callbacks
 	state.frame_rate_ns = 1_000_000_000 / 30
 
 	// Display is always the first ID
@@ -386,6 +383,7 @@ display_submit_frame :: proc(state: ^Display_State) {
 }
 
 display_submit_first_frame :: proc(state: ^Display_State) {
+	state.last_frame_time_ns = get_perf_counter_wall_ns()
 	request_frame_callback(state)
 	display_submit_frame(state)
 }
@@ -632,18 +630,25 @@ request_frame_callback :: proc(state: ^Display_State) {
 handle_frame_callback :: proc(state: ^Display_State, event: wayland.Wl_Callback_Done_Event) {
 	request_frame_callback(state)
 
+	// Use frame timestamps to calculate frame rate, but use local clock for
+	// `last_frame_time_ns` since it needs to be compared with intra-frame
+	// timestamps.
+	// TODO: When using wp_presentation, the timestamp from the wayland server can
+	// be used, since it also provides a clock ID that lets the client fetch
+	// timestamps to comapre against the event timestamps.
+	state.last_frame_time_ns = get_perf_counter_wall_ns()
+
 	frame_time_ms := event.callback_data
-	frame_time_ns := i64(frame_time_ms) * 1_000_000
-
-	frame_dt_ns: i64
-	if state.last_frame_time_ns == 0 {
-		frame_dt_ns = 0
+	frame_dt_ms: u32
+	if state.last_cb_time_ms == 0 {
+		frame_dt_ms = 0
 	} else {
-		frame_dt_ns = frame_time_ns - state.last_frame_time_ns
+		frame_dt_ms = frame_time_ms - state.last_cb_time_ms
 	}
-	log.debugf("frame flip: {}ms", f64(frame_dt_ns) / 1_000_000.0)
+	log.debugf("frame flip: {}ms", frame_dt_ms)
 
-	state.last_frame_time_ns = frame_time_ns
+	state.frame_rate_ns = i64(frame_dt_ms) * 1_000_000
+	state.last_cb_time_ms = frame_time_ms
 }
 
 handle_buffer_release :: proc(
@@ -802,17 +807,11 @@ destroy_shm_mapping :: proc(shm_fd: posix.FD, shm_buf: []u8) {
 
 import "vendor/alsa"
 
-SAMPLE_RATE :: 48000
-BUF_DURATION_SEC :: 2
-BUF_FRAME_COUNT :: BUF_DURATION_SEC * SAMPLE_RATE
-
-// 30 FPS
-LATENCY_US :: 1_000_000 / 30
-
 Audio_State :: struct {
 	pcm:         alsa.Pcm,
 	buffer_size: alsa.Pcm_Uframes,
 	period_size: alsa.Pcm_Uframes,
+	config:      Audio_Output_Config,
 }
 
 Audio_Error :: enum {
@@ -826,34 +825,111 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 		return .Failed
 	}
 
-	if err := alsa.pcm_set_params(
-		state.pcm,
-		format = .S16,
-		access = .MMAP_INTERLEAVED,
-		channels = 2,
-		rate = SAMPLE_RATE,
-		soft_resample = .Enable,
-		// TODO: Play around with buffer/period size
-		latency = LATENCY_US * 2,
-	); err != 0 {
-		log.error("failed to configure audio device:", alsa.strerror(err))
-		return .Failed
-	}
+	TARGET_SAMPLE_RATE :: 48000
+	TARGET_FRAME_US :: 1_000_000 / 30
 
-	// TODO: Alignment?
-	sw_params_buf := make([]u8, alsa.pcm_sw_params_sizeof(), context.temp_allocator)
-	sw_params := (^alsa.Pcm_Sw_Params)(&sw_params_buf[0])
+	// if err := alsa.pcm_set_params(
+	// 	state.pcm,
+	// 	format = .S16,
+	// 	access = .MMAP_INTERLEAVED,
+	// 	channels = 2,
+	// 	rate = TARGET_SAMPLE_RATE,
+	// 	soft_resample = .Enable,
+	// 	// TODO: Play around with buffer/period size
+	// 	latency = TARGET_FRAME_US * 2,
+	// ); err != 0 {
+	// 	log.error("failed to configure audio device:", alsa.strerror(err))
+	// 	return .Failed
+	// }
+
 	// TODO: Error handling
-	alsa.pcm_sw_params_current(state.pcm, sw_params)
-	alsa.pcm_sw_params_set_start_threshold(state.pcm, sw_params, max(alsa.Pcm_Uframes))
-	alsa.pcm_sw_params_set_stop_threshold(state.pcm, sw_params, 0)
-	alsa.pcm_sw_params_set_silence_size(state.pcm, sw_params, SAMPLE_RATE)
-	alsa.pcm_sw_params(state.pcm, sw_params)
-
-	if err := alsa.pcm_get_params(state.pcm, &state.buffer_size, &state.period_size); err != 0 {
-		log.error("failed to fetch configuration:", alsa.strerror(err))
+	// TODO: Alignment?
+	hw_params := alsa.pcm_hw_params_alloc(context.temp_allocator)
+	if err := alsa.pcm_hw_params_any(state.pcm, hw_params); err < 0 {
+		log.error("audio: failed to get HW arams:", alsa.strerror(err))
 		return .Failed
 	}
+	// Based on pcm_set_params, but with some customizations
+	if err := alsa.pcm_hw_params_set_rate_resample(state.pcm, hw_params, .Enable); err != 0 {
+		log.error("audio: failed to set rate resample:", alsa.strerror(err))
+		return .Failed
+	}
+	if err := alsa.pcm_hw_params_set_access(state.pcm, hw_params, .MMAP_INTERLEAVED); err != 0 {
+		log.error("audio: failed to set access mode:", alsa.strerror(err))
+		return .Failed
+	}
+	if err := alsa.pcm_hw_params_set_format(state.pcm, hw_params, .S16); err != 0 {
+		log.error("audio: failed to set format:", alsa.strerror(err))
+		return .Failed
+	}
+	if err := alsa.pcm_hw_params_set_channels(state.pcm, hw_params, 2); err != 0 {
+		log.error("audio: failed to set channels:", alsa.strerror(err))
+		return .Failed
+	}
+
+	sample_rate: c.uint = TARGET_SAMPLE_RATE
+	if err := alsa.pcm_hw_params_set_rate_near(state.pcm, hw_params, &sample_rate, nil); err != 0 {
+		log.error("audio: failed to set rate:", alsa.strerror(err))
+		return .Failed
+	}
+	state.config.sample_rate = uint(sample_rate)
+
+	// TODO: Play around with period/buffer time settings
+
+	period_time_us: c.uint = TARGET_FRAME_US / 2
+	if err := alsa.pcm_hw_params_set_period_time_near(state.pcm, hw_params, &period_time_us, nil);
+	   err != 0 {
+		log.error("audio: failed to set period time:", alsa.strerror(err))
+		return .Failed
+	}
+	buffer_time_us: c.uint = TARGET_FRAME_US * 2
+	if err := alsa.pcm_hw_params_set_buffer_time_near(state.pcm, hw_params, &buffer_time_us, nil);
+	   err != 0 {
+		log.error("audio: failed to set buffer time:", alsa.strerror(err))
+		return .Failed
+	}
+
+	if err := alsa.pcm_hw_params_get_buffer_size(hw_params, &state.buffer_size); err != 0 {
+		log.error("audio: failed to get buffer size:", alsa.strerror(err))
+		return .Failed
+	}
+	if err := alsa.pcm_hw_params_get_period_size(hw_params, &state.period_size); err != 0 {
+		log.error("audio: failed to get period size:", alsa.strerror(err))
+		return .Failed
+	}
+
+	if err := alsa.pcm_hw_params(state.pcm, hw_params); err != 0 {
+		log.error("audio: failed to set HW params:", alsa.strerror(err))
+		return .Failed
+	}
+
+	sw_params, _ := alsa.pcm_sw_params_alloc(context.temp_allocator)
+	if err := alsa.pcm_sw_params_current(state.pcm, sw_params); err != 0 {
+		log.error("audio: failed to get SW params:", alsa.strerror(err))
+		return .Failed
+	}
+
+	if err := alsa.pcm_sw_params_set_avail_min(state.pcm, sw_params, state.period_size); err != 0 {
+		log.error("audio: failed to set avail min:", alsa.strerror(err))
+		return .Failed
+	}
+	// Disable auto-start
+	if err := alsa.pcm_sw_params_set_start_threshold(state.pcm, sw_params, max(alsa.Pcm_Uframes));
+	   err != 0 {
+		log.error("audio: failed to set start threshold:", alsa.strerror(err))
+		return .Failed
+	}
+	// Only stop when empty
+	if err := alsa.pcm_sw_params_set_stop_threshold(state.pcm, sw_params, 0); err != 0 {
+		log.error("audio: failed to set stop threshold:", alsa.strerror(err))
+		return .Failed
+	}
+
+	if err := alsa.pcm_sw_params(state.pcm, sw_params); err != 0 {
+		log.error("audio: failed to set SW params:", alsa.strerror(err))
+		return .Failed
+	}
+
 	log.infof(
 		"audio device config: buffer_size={} period_size={}",
 		state.buffer_size,
@@ -897,14 +973,6 @@ get_audio_buffer :: proc(
 }
 
 audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
-	now_ns := get_perf_counter_wall_ns()
-	next_frame_start_target_ns := state.display.last_frame_time_ns // + state.display.frame_rate_ns
-	next_frame_end_target_ns := next_frame_start_target_ns + state.display.frame_rate_ns
-	// TODO: Handle this case
-	assert(now_ns < next_frame_start_target_ns)
-	margin_ns := now_ns - state.display.last_frame_time_ns
-	write_target_ns := next_frame_end_target_ns + margin_ns
-
 	audio := &state.audio
 	// Based on ALSA's PCM example:
 	// https://www.alsa-project.org/alsa-doc/alsa-lib/_2test_2alsa.pcm_8c-example.html#example_test_pcm
@@ -955,36 +1023,15 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 		// 	continue
 		// }
 
-		if alsa.Pcm_Uframes(avail) < audio.period_size {
-			// Wait for more data
+		log.debugf("audio state: delay={}frames avail={}frames", delay, avail)
+		if avail == 0 {
 			return nil
 		}
-		log.debugf("audio state: delay={}frames avail={}frames", delay, avail)
 
 		// TODO: Repeat just this section if possible to avoid re-checking status?
-		delay_ns := delay * 1_000_000_000 / SAMPLE_RATE
-		write_timestamp_ns := now_ns + delay_ns
-		// TODO: Handle when starting delay is past the next target
-
-		log.debugf(
-			"next={} next'={} now={} write={} target={}",
-			f64(next_frame_start_target_ns - state.display.last_frame_time_ns) / 1_000_000.0,
-			f64(next_frame_end_target_ns - state.display.last_frame_time_ns) / 1_000_000.0,
-			f64(now_ns - state.display.last_frame_time_ns) / 1_000_000.0,
-			f64(write_timestamp_ns - state.display.last_frame_time_ns) / 1_000_000.0,
-			f64(write_target_ns - state.display.last_frame_time_ns) / 1_000_000.0,
-		)
-
-		if write_timestamp_ns >= next_frame_end_target_ns {
-			return nil
-		}
-
-		write_dur_ns := write_target_ns - write_timestamp_ns
-		target_write_frames := (write_dur_ns * SAMPLE_RATE / 1_000_000_000)
-
 		area: [^]alsa.Pcm_Channel_Area // Multi-pointer for the API
 		offset: alsa.Pcm_Uframes
-		space := alsa.Pcm_Uframes(target_write_frames)
+		space := alsa.Pcm_Uframes(avail)
 		if err := alsa.pcm_mmap_begin(audio.pcm, &area, &offset, &space); err != 0 {
 			log.error("failed to lock mmap area:", alsa.strerror(err))
 			return .Failed
@@ -993,7 +1040,7 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 		frame_buf, ok := get_audio_buffer(audio.buffer_size, area, offset, space)
 		if !ok do return .Failed
 
-		game_render_audio(&state.game, frame_buf)
+		game_render_audio(&state.game, state.audio.config, frame_buf)
 
 		if err := alsa.pcm_mmap_commit(audio.pcm, offset, space); err < 0 {
 			log.error("failed to commit mmap area:", alsa.strerror(i32(err)))
@@ -1050,8 +1097,7 @@ audio_handle_poll :: proc(state: ^State, pfds: []posix.pollfd) -> Audio_Error {
 	}
 
 	if .OUT in revents {
-		// return audio_fill_buffer(state)
-		return nil
+		return audio_fill_buffer(state)
 	} else {
 		return nil
 	}
