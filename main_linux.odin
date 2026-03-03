@@ -3,7 +3,6 @@ package main
 import "base:intrinsics"
 import "core:c"
 import "core:log"
-import "core:math"
 import "core:math/rand"
 import "core:mem"
 import "core:os"
@@ -14,6 +13,7 @@ import "core:sys/posix"
 State :: struct {
 	display: Display_State,
 	audio:   Audio_State,
+	game:    Game_State,
 }
 
 main :: proc() {
@@ -28,33 +28,60 @@ main :: proc() {
 	game_loop(&state)
 }
 
+MIN_UPDATE_PERIOD_NS :: 1_000_000_000 / 30
+
 game_loop :: proc(state: ^State) {
-	last_frame_time: i64
+	poll_fds: []posix.pollfd
+	display_poll_fd: ^posix.pollfd
+	audio_poll_fds: []posix.pollfd
+	{
+		audio_poll_fd_count := audio_get_poll_descriptor_count(&state.audio)
+		display_poll_fd_count := 1
+		poll_fds = make([]posix.pollfd, display_poll_fd_count + audio_poll_fd_count)
+		offset := 0
+		display_poll_fd = &poll_fds[offset]
+		offset += display_poll_fd_count
+		audio_poll_fds = poll_fds[offset:][:audio_poll_fd_count]
+		offset += audio_poll_fd_count
+		assert(offset == len(poll_fds))
+	}
+
+	// display_poll_fd is initialized each time based on the state
+
+	// ALSA docs say this can be called once since it doesn't need to change
+	// dynamically:
+	// https://www.alsa-project.org/alsa-doc/alsa-lib/group___p_c_m.html#ga742e8705f6992fd0e36efc868e574f01
+	if ok := audio_get_poll_descriptors(&state.audio, audio_poll_fds); !ok {
+		// TODO: Don't exit in case of audio-related failures?
+		log.error("failed to initialize audio file descriptors")
+		return
+	}
+
+	display_setup_first_frame(&state.display)
+
 	last_loop_ns: i64
+	last_update_time_ns: i64 = get_perf_counter_cpu_ns()
+	last_render_time_ns: i64 = -1
 
 	loop: for !state.display.close_requested {
 		counter_start_wall_ns := get_perf_counter_wall_ns()
 		counter_start_cpu_ns := get_perf_counter_cpu_ns()
 		counter_start_cpu_cycles := get_perf_counter_cpu_cycles()
 
-		// Fixed-capacity dynamic array
-		// TODO: Use temp_allocator with intial size to avoid pre-allocating a "worst-case"?
-		// NOTE: If that is changed, we can't take references to slices of the dynamic array for
-		// use after polling, since it may have moved
-		poll_fds_buf: [DISPLAY_POLL_FDS + AUDIO_MAX_POLL_FDS]posix.pollfd
-		poll_fds := mem.buffer_from_slice(poll_fds_buf[:])
+		if poll_fd, ok := display_get_poll_descriptor(&state.display); ok {
+			display_poll_fd^ = poll_fd
+		} else {
+			log.error("failed to setup display file descriptors")
+			break
+		}
 
-		append(&poll_fds, display_get_poll_descriptor(&state.display) or_break)
-		display_poll := &poll_fds[0]
-
-		// TODO: Don't break in case of audio-related failures to consider non-critital?
-		// audio_nfds := audio_get_poll_descriptor_count(&state.audio) or_break
-		// audio_poll := poll_fds[nfds:][:audio_nfds]
-		// audio_get_poll_descriptors(&state.audio, audio_poll) or_break
-		// nfds += audio_nfds
-		audio_poll := audio_append_poll_descriptors(&state.audio, &poll_fds) or_break
-
-		switch poll_res := posix.poll(&poll_fds[0], posix.nfds_t(len(poll_fds)), -1); poll_res {
+		// Set timeout at next simulation frame boundary in case there are no
+		// display/audio events to process
+		next_update_time_ns := last_update_time_ns + MIN_UPDATE_PERIOD_NS
+		max_wait_time_ms := i32(
+			max(next_update_time_ns - get_perf_counter_cpu_ns(), 0) / 1_000_000,
+		)
+		switch poll_res := posix.poll(&poll_fds[0], posix.nfds_t(1), max_wait_time_ms); poll_res {
 		case 0:
 			// timeout
 			continue loop
@@ -64,24 +91,29 @@ game_loop :: proc(state: ^State) {
 			break loop
 		}
 
-		display_handle_poll(&state.display, display_poll) or_break
+		display_handle_poll(&state.display, display_poll_fd) or_break
 		if button_input_press_count(state.display.keyboard_input[.Esc]) > 0 {
 			break
 		}
 
-		frame_time := get_perf_counter_wall_ns()
-		dt_ns := frame_time - last_frame_time
-		last_frame_time = frame_time
+		// TODO: Simulate at fixed DT? Would require running this potentially
+		// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
+		now := get_perf_counter_wall_ns()
+		if now >= next_update_time_ns {
+			// TODO: Don't create the Game_Input object every time
+			input := Game_Input{state.display.keyboard_input}
+			game_update(&state.game, input, now - last_update_time_ns)
+			keyboard_input_reset(&state.display.keyboard_input)
 
-		// TODO: Don't need to the state every time
-		input := Game_Input{state.display.keyboard_input}
-		game_render(state.display.frame_buffer, input, dt_ns)
-		draw(&state.display)
+			last_update_time_ns = now
+		}
 
-		audio_handle_poll(&state.audio, audio_poll, input) or_break
+		if state.display.last_frame_time_ns > last_render_time_ns {
+			game_render(&state.game, state.display.frame_buffers[state.display.back_buffer_index])
+			last_render_time_ns = state.display.last_frame_time_ns
+		}
 
-		// Reset after the frame
-		keyboard_input_reset(&state.display.keyboard_input)
+		audio_handle_poll(state, audio_poll_fds) or_break
 
 		free_all(context.temp_allocator)
 
@@ -89,7 +121,7 @@ game_loop :: proc(state: ^State) {
 		counter_total_cpu_ns := get_perf_counter_cpu_ns() - counter_start_cpu_ns
 		counter_total_cpu_cycles := get_perf_counter_cpu_cycles() - counter_start_cpu_cycles
 
-		log.infof(
+		log.debugf(
 			"perf counter: wall={}ms  cpu={}ms  cycles={}K",
 			counter_total_wall_ns / 1_000_000,
 			counter_total_cpu_ns / 1_000_000,
@@ -100,44 +132,49 @@ game_loop :: proc(state: ^State) {
 
 // Video
 
-
 import "vendor/wayland"
 
-DISPLAY_POLL_FDS :: 1
+BUFFER_COUNT :: 2
 
 Display_State :: struct {
-	conn:            wayland.Connection,
+	conn:               wayland.Connection,
 
 	// Static IDs
-	wl_display:      wayland.Wl_Display,
-	wl_registry:     wayland.Wl_Registry,
+	wl_display:         wayland.Wl_Display,
+	wl_registry:        wayland.Wl_Registry,
 
 	// Bound IDs from the registry
-	wl_compositor:   wayland.Wl_Compositor,
-	wl_seat:         wayland.Wl_Seat,
-	wl_shm:          wayland.Wl_Shm,
-	xdg_wm_base:     wayland.Xdg_Wm_Base,
+	wl_compositor:      wayland.Wl_Compositor,
+	wl_seat:            wayland.Wl_Seat,
+	wl_shm:             wayland.Wl_Shm,
+	xdg_wm_base:        wayland.Xdg_Wm_Base,
 
 	// SHM-related data (pointed is tracked in frame_buffer)
-	shm_fd:          posix.FD,
-	shm_data:        []u8,
+	shm_fd:             posix.FD,
+	shm_data:           []u8,
 	// TODO: Do these need to be persistend long-term?
-	wl_shm_pool:     wayland.Wl_Shm_Pool,
+	wl_shm_pool:        wayland.Wl_Shm_Pool,
 
 	// Window-related objects and data
-	wl_surface:      wayland.Wl_Surface,
-	wl_buffer:       wayland.Wl_Buffer,
-	xdg_surface:     wayland.Xdg_Surface,
-	xdg_toplevel:    wayland.Xdg_Toplevel,
-	surface_state:   Surface_State,
-	close_requested: bool,
+	wl_surface:         wayland.Wl_Surface,
+	wl_buffers:         [BUFFER_COUNT]wayland.Wl_Buffer,
+	xdg_surface:        wayland.Xdg_Surface,
+	xdg_toplevel:       wayland.Xdg_Toplevel,
+	surface_state:      Surface_State,
+	close_requested:    bool,
+
+	// Index of the buffer which should be used to render the next frame
+	back_buffer_index:  int,
 
 	// Input
-	wl_keyboard:     wayland.Wl_Keyboard,
-	keyboard_input:  Keyboard_Input,
+	wl_keyboard:        wayland.Wl_Keyboard,
+	keyboard_input:     Keyboard_Input,
 
 	// Frame state
-	frame_buffer:    Frame_Buffer,
+	frame_buffers:      [BUFFER_COUNT]Frame_Buffer,
+	frame_callback:     wayland.Wl_Callback,
+	frame_rate_ns:      i64,
+	last_frame_time_ns: i64,
 }
 
 COLOR_CHANNELS :: 4
@@ -154,6 +191,9 @@ display_init :: proc(state: ^Display_State) -> bool {
 		return false
 	}
 
+	// TODO: Query Wayland for this
+	state.frame_rate_ns = 1_000_000_000 / 30
+
 	// Display is always the first ID
 	state.wl_display, _ = wayland.connection_alloc_id(&state.conn)
 
@@ -163,21 +203,6 @@ display_init :: proc(state: ^Display_State) -> bool {
 		log.fatal("failed to setup wl_registry:", err)
 		return false
 	}
-
-	// TODO: I guess this needs to be re-created when the window is?
-	state.frame_buffer.width = 640
-	state.frame_buffer.height = 480
-	state.frame_buffer.stride = state.frame_buffer.width * COLOR_CHANNELS
-
-	shm_err: Shm_Error
-	shm_data: []u8
-	state.shm_fd, state.shm_data, shm_err = create_shm_file(
-		uint(state.frame_buffer.stride * state.frame_buffer.height),
-	)
-	if shm_err != nil {
-		log.fatal("failed to create SHM file:", posix.strerror())
-	}
-	state.frame_buffer.base = &state.shm_data[0]
 
 	// Initial setup event loop to bind to globals
 	for state.wl_compositor == 0 || state.wl_shm == 0 || state.xdg_wm_base == 0 {
@@ -210,27 +235,70 @@ display_init :: proc(state: ^Display_State) -> bool {
 	_ = wayland.xdg_toplevel_set_title(&state.conn, state.xdg_toplevel, "Handmade")
 	_ = wayland.wl_surface_commit(&state.conn, state.wl_surface)
 
-	// TODO: Resize pool/buffers when window is resized
+	display_setup_buffers(state, 640, 480)
+
+	return true
+}
+
+display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
+	stride := width * COLOR_CHANNELS
+	buffer_size := stride * height
+
+	// Free current allocations
+	// TODO: Re-use current SHM allocation when possible
+	// TODO: Look into wl_shm_pool_resize when growing the pool
+
+	for buf in state.wl_buffers {
+		if buf != wayland.OBJECT_ID_NIL {
+			_ = wayland.wl_buffer_destroy(&state.conn, buf)
+		}
+	}
+	if state.wl_shm_pool != wayland.OBJECT_ID_NIL {
+		_ = wayland.wl_shm_pool_destroy(&state.conn, state.wl_shm_pool)
+	}
+	destroy_shm_mapping(state.shm_fd, state.shm_data)
+
+	shm_err: Shm_Error
+	shm_data: []u8
+	state.shm_fd, state.shm_data, shm_err = create_shm_file(BUFFER_COUNT * uint(buffer_size))
+	if shm_err != nil {
+		log.fatal("failed to create SHM file:", posix.strerror())
+		return
+	}
+	for &fb, i in state.frame_buffers {
+		fb.width = width
+		fb.height = height
+		fb.stride = stride
+		fb.base = &state.shm_data[i * int(buffer_size)]
+	}
+
 	state.wl_shm_pool, _ = wayland.wl_shm_create_pool(
 		&state.conn,
 		state.wl_shm,
 		state.shm_fd,
 		i32(len(state.shm_data)),
 	)
-	// TODO: Setup double-buffering
-	state.wl_buffer, _ = wayland.wl_shm_pool_create_buffer(
-		&state.conn,
-		state.wl_shm_pool,
-		offset = 0,
-		width = i32(state.frame_buffer.width),
-		height = i32(state.frame_buffer.height),
-		stride = i32(state.frame_buffer.stride),
-		format = .Xrgb8888,
-	)
-	// TODO: Destroy wl_shm_pool after buffers are created
-	_ = wayland.wl_surface_attach(&state.conn, state.wl_surface, state.wl_buffer, 0, 0)
+	for &buf, i in state.wl_buffers {
+		buf, _ = wayland.wl_shm_pool_create_buffer(
+			&state.conn,
+			state.wl_shm_pool,
+			offset = i32(i * int(buffer_size)),
+			width = i32(width),
+			height = i32(height),
+			stride = i32(stride),
+			format = .Xrgb8888,
+		)
+	}
 
-	return true
+	// Attach one of the new, valid buffers
+	// TODO: Will this result in blank frames when resizing?
+	_ = wayland.wl_surface_attach(
+		&state.conn,
+		state.wl_surface,
+		state.wl_buffers[state.back_buffer_index],
+		0,
+		0,
+	)
 }
 
 display_get_poll_descriptor :: proc(state: ^Display_State) -> (poll: posix.pollfd, ok: bool) {
@@ -242,14 +310,27 @@ display_get_poll_descriptor :: proc(state: ^Display_State) -> (poll: posix.pollf
 }
 
 display_handle_poll :: proc(state: ^Display_State, poll: ^posix.pollfd) -> (ok: bool) {
-	if poll.revents & {.IN, .OUT} == {} do return true
+	if poll.revents & {.IN, .OUT} == {} {
+		return true
+	}
 	process_wayland_messages(state)
 	return true
 }
 
-draw :: proc(state: ^Display_State) {
+// Submit the current frame, rendered in the back-buffer, and swap buffers to
+// prepare for the next frame
+submit_frame :: proc(state: ^Display_State) {
+	wayland.wl_surface_attach(
+		&state.conn,
+		state.wl_surface,
+		state.wl_buffers[state.back_buffer_index],
+		0,
+		0,
+	)
 	wayland.wl_surface_damage_buffer(&state.conn, state.wl_surface, 0, 0, max(i32), max(i32))
 	wayland.wl_surface_commit(&state.conn, state.wl_surface)
+
+	state.back_buffer_index = (state.back_buffer_index + 1) % BUFFER_COUNT
 }
 
 process_wayland_messages :: proc(state: ^Display_State) {
@@ -394,15 +475,27 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 			return nil
 		}
 
-	// case state.frame_callback:
-	// 	switch opcode {
-	// 	case wayland.WL_CALLBACK_DONE_EVENT_OPCODE:
-	// 		handle_frame_callback(
-	// 			state,
-	// 			wayland.wl_callback_done_parse(&state.conn, message) or_return,
-	// 		)
-	// 		return nil
-	// 	}
+	case state.frame_callback:
+		switch opcode {
+		case wayland.WL_CALLBACK_DONE_EVENT_OPCODE:
+			handle_frame_callback(
+				state,
+				wayland.wl_callback_done_parse(&state.conn, message) or_return,
+			)
+			return nil
+		}
+	}
+	for buf in state.wl_buffers {
+		if message.header.target == buf {
+			switch opcode {
+			case wayland.WL_BUFFER_RELEASE_EVENT_OPCODE:
+				handle_buffer_release(
+					state,
+					wayland.wl_buffer_release_parse(&state.conn, message) or_return,
+				)
+				return nil
+			}
+		}
 	}
 
 	log.debugf(
@@ -470,6 +563,42 @@ handle_xdg_toplevel_configure :: proc(
 	states := mem.slice_data_cast([]wayland.Xdg_Toplevel_State_Enum, event.states)
 	log.debug("xdg_toplevel.configure: states={}", states)
 	// TODO: Actually handle the requests
+}
+
+request_frame_callback :: proc(state: ^Display_State) {
+	if cb, err := wayland.wl_surface_frame(&state.conn, state.wl_surface); err == nil {
+		state.frame_callback = cb
+	} else {
+		log.errorf("frame request failed: {}", err)
+	}
+}
+
+handle_frame_callback :: proc(state: ^Display_State, event: wayland.Wl_Callback_Done_Event) {
+	request_frame_callback(state)
+
+	frame_time_ms := event.callback_data
+	frame_time_ns := i64(frame_time_ms) * 1_000_000
+
+	frame_dt_ns: i64
+	if state.last_frame_time_ns == 0 {
+		frame_dt_ns = 0
+	} else {
+		frame_dt_ns = frame_time_ns - state.last_frame_time_ns
+	}
+	log.debugf("frame: {}ms", f64(frame_dt_ns) / 1_000_000.0)
+
+	state.last_frame_time_ns = frame_time_ns
+
+	submit_frame(state)
+}
+
+display_setup_first_frame :: proc(state: ^Display_State) {
+	request_frame_callback(state)
+}
+
+handle_buffer_release :: proc(state: ^Display_State, event: wayland.Wl_Buffer_Release_Event) {
+	// TODO: Is there anything to do here?
+	// With double-buffering, this seems irrelevant
 }
 
 handle_xdg_toplevel_close :: proc(state: ^Display_State, event: wayland.Xdg_Toplevel_Close_Event) {
@@ -603,6 +732,19 @@ create_shm_file :: proc(size: uint) -> (shm_fd: posix.FD, shm_buf: []u8, err: Sh
 	return
 }
 
+destroy_shm_mapping :: proc(shm_fd: posix.FD, shm_buf: []u8) {
+	if shm_fd == 0 {
+		return
+	}
+
+	if res := posix.close(shm_fd); res != .OK {
+		log.warnf("failed to close SHM file descriptor: {}", posix.strerror())
+	}
+	if res := posix.munmap(&shm_buf[0], len(shm_buf)); res != .OK {
+		log.warnf("failed to unmap SHM region: {}", posix.strerror())
+	}
+}
+
 // Audio
 
 import "vendor/alsa"
@@ -638,29 +780,39 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 		channels = 2,
 		rate = SAMPLE_RATE,
 		soft_resample = .Enable,
-		latency = LATENCY_US,
+		// TODO: Play around with buffer/period size
+		latency = LATENCY_US * 2,
 	); err != 0 {
 		log.error("failed to configure audio device:", alsa.strerror(err))
 		return .Failed
 	}
 
+	// TODO: Alignment?
+	sw_params_buf := make([]u8, alsa.pcm_sw_params_sizeof(), context.temp_allocator)
+	sw_params := (^alsa.Pcm_Sw_Params)(&sw_params_buf[0])
+	// TODO: Error handling
+	alsa.pcm_sw_params_current(state.pcm, sw_params)
+	alsa.pcm_sw_params_set_start_threshold(state.pcm, sw_params, max(alsa.Pcm_Uframes))
+	alsa.pcm_sw_params_set_stop_threshold(state.pcm, sw_params, 0)
+	alsa.pcm_sw_params_set_silence_size(state.pcm, sw_params, SAMPLE_RATE)
+	alsa.pcm_sw_params(state.pcm, sw_params)
+
 	if err := alsa.pcm_get_params(state.pcm, &state.buffer_size, &state.period_size); err != 0 {
 		log.error("failed to fetch configuration:", alsa.strerror(err))
 		return .Failed
 	}
-	log.debugf(
+	log.infof(
 		"audio device config: buffer_size={} period_size={}",
 		state.buffer_size,
 		state.period_size,
 	)
 
 	// TODO: Is this necessary?
-	// if err := alsa.pcm_prepare(state.pcm); err != 0 {
-	// 	log.error("failed to prepare audio device:", alsa.strerror(err))
-	// 	return .Failed
-	// }
+	if err := alsa.pcm_prepare(state.pcm); err != 0 {
+		log.error("failed to prepare audio device:", alsa.strerror(err))
+		return .Failed
+	}
 
-	// log.debug("prepared audio device: buf_size={} sbits={}", buf_size, sig_bits)
 	return nil
 }
 
@@ -691,29 +843,42 @@ get_audio_buffer :: proc(
 	return full_buffer[offset:][:space], true
 }
 
-audio_fill_buffer :: proc(state: ^Audio_State, input: Game_Input) -> Audio_Error {
+audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
+	now_ns := get_perf_counter_wall_ns()
+	next_frame_start_target_ns := state.display.last_frame_time_ns // + state.display.frame_rate_ns
+	next_frame_end_target_ns := next_frame_start_target_ns + state.display.frame_rate_ns
+	// TODO: Handle this case
+	assert(now_ns < next_frame_start_target_ns)
+	margin_ns := now_ns - state.display.last_frame_time_ns
+	write_target_ns := next_frame_end_target_ns + margin_ns
+
+	audio := &state.audio
+	// Based on ALSA's PCM example:
+	// https://www.alsa-project.org/alsa-doc/alsa-lib/_2test_2alsa.pcm_8c-example.html#example_test_pcm
 	// Loop until "would block"
 	audio_loop: for {
 		need_start: bool
-		#partial switch status := alsa.pcm_state(state.pcm); status {
+		#partial switch status := alsa.pcm_state(audio.pcm); status {
 		case .STATE_RUNNING:
 			need_start = false
 		case .STATE_XRUN:
-			if err := alsa.pcm_recover(state.pcm, -posix.EPIPE, alsa.PCM_RECOVER_VERBOSE);
+			log.warn("audio overrun")
+			if err := alsa.pcm_recover(audio.pcm, -posix.EPIPE, alsa.PCM_RECOVER_VERBOSE);
 			   err != 0 {
 				log.error("failed to recover:", alsa.strerror(err))
 				return .Failed
 			}
-			// TODO: Is this needed? ALSA's example does it, but it seems redundant
-			// https://www.alsa-project.org/alsa-doc/alsa-lib/_2test_2alsa.pcm_8c-example.html#example_test_pcm
+			// TODO: Is this needed? ALSA's example does it, but it seems redundant to
+			// re-check the status
 			continue audio_loop
 		case:
 			need_start = true
 		}
 
-		if avail := alsa.pcm_avail_update(state.pcm); avail < 0 {
-			if err := alsa.pcm_recover(state.pcm, c.int(avail), alsa.PCM_RECOVER_VERBOSE);
-			   err != 0 {
+		avail: alsa.Pcm_Sframes
+		delay: alsa.Pcm_Sframes
+		if err := alsa.pcm_avail_delay(audio.pcm, &avail, &delay); err != 0 {
+			if err := alsa.pcm_recover(audio.pcm, err, alsa.PCM_RECOVER_VERBOSE); err != 0 {
 				log.error(
 					"failed to update available space: failed to recover:",
 					alsa.strerror(err),
@@ -721,27 +886,63 @@ audio_fill_buffer :: proc(state: ^Audio_State, input: Game_Input) -> Audio_Error
 				return .Failed
 			}
 			continue
-		} else if alsa.Pcm_Uframes(avail) < state.period_size {
+		}
+
+		// Supposedly faster version that doesn't return delay
+		// avail := alsa.pcm_avail_update(audio.pcm)
+		// if avail < 0 {
+		// 	if err := alsa.pcm_recover(audio.pcm, c.int(avail), alsa.PCM_RECOVER_VERBOSE);
+		// 	   err != 0 {
+		// 		log.error(
+		// 			"failed to update available space: failed to recover:",
+		// 			alsa.strerror(err),
+		// 		)
+		// 		return .Failed
+		// 	}
+		// 	continue
+		// }
+
+		if alsa.Pcm_Uframes(avail) < audio.period_size {
 			// Wait for more data
 			return nil
 		}
+		log.debugf("audio state: delay={}frames avail={}frames", delay, avail)
 
 		// TODO: Repeat just this section if possible to avoid re-checking status?
+		delay_ns := delay * 1_000_000_000 / SAMPLE_RATE
+		write_timestamp_ns := now_ns + delay_ns
+		// TODO: Handle when starting delay is past the next target
+
+		log.debugf(
+			"next={} next'={} now={} write={} target={}",
+			f64(next_frame_start_target_ns - state.display.last_frame_time_ns) / 1_000_000.0,
+			f64(next_frame_end_target_ns - state.display.last_frame_time_ns) / 1_000_000.0,
+			f64(now_ns - state.display.last_frame_time_ns) / 1_000_000.0,
+			f64(write_timestamp_ns - state.display.last_frame_time_ns) / 1_000_000.0,
+			f64(write_target_ns - state.display.last_frame_time_ns) / 1_000_000.0,
+		)
+
+		if write_timestamp_ns >= next_frame_end_target_ns {
+			return nil
+		}
+
+		write_dur_ns := write_target_ns - write_timestamp_ns
+		target_write_frames := (write_dur_ns * SAMPLE_RATE / 1_000_000_000)
 
 		area: [^]alsa.Pcm_Channel_Area // Multi-pointer for the API
 		offset: alsa.Pcm_Uframes
-		space: alsa.Pcm_Uframes = state.buffer_size // TODO: Just request max(alsa.Pcm_Uframes)?
-		if err := alsa.pcm_mmap_begin(state.pcm, &area, &offset, &space); err != 0 {
+		space := alsa.Pcm_Uframes(target_write_frames)
+		if err := alsa.pcm_mmap_begin(audio.pcm, &area, &offset, &space); err != 0 {
 			log.error("failed to lock mmap area:", alsa.strerror(err))
 			return .Failed
 		}
 
-		frame_buf, ok := get_audio_buffer(state.buffer_size, area, offset, space)
+		frame_buf, ok := get_audio_buffer(audio.buffer_size, area, offset, space)
 		if !ok do return .Failed
 
-		game_render_audio(frame_buf, input)
+		game_render_audio(&state.game, frame_buf)
 
-		if err := alsa.pcm_mmap_commit(state.pcm, offset, space); err < 0 {
+		if err := alsa.pcm_mmap_commit(audio.pcm, offset, space); err < 0 {
 			log.error("failed to commit mmap area:", alsa.strerror(i32(err)))
 			return .Failed
 		} else if alsa.Pcm_Uframes(err) != space {
@@ -750,7 +951,7 @@ audio_fill_buffer :: proc(state: ^Audio_State, input: Game_Input) -> Audio_Error
 
 		// Start after putting something in the buffer
 		if need_start {
-			if err := alsa.pcm_start(state.pcm); err != 0 {
+			if err := alsa.pcm_start(audio.pcm); err != 0 {
 				log.error("failed to start audio device:", alsa.strerror(err))
 				return .Failed
 			}
@@ -766,20 +967,8 @@ audio_destroy :: proc(state: ^Audio_State) -> Audio_Error {
 	return nil
 }
 
-// Take from alsa-lib source:
-// https://github.com/alsa-project/alsa-lib/blob/3a9771812405be210e760e4e6667f2c023fe82f4/src/pcm/pcm.c#L2974
-AUDIO_MAX_POLL_FDS :: 15
-
-audio_get_poll_descriptor_count :: proc(state: ^Audio_State) -> (n: int, ok: bool) {
-	if res := alsa.pcm_poll_descriptors_count(state.pcm); res < 0 {
-		log.error("failed to determine poll descriptor count:", alsa.strerror(res))
-		return 0, false
-	} else if res > AUDIO_MAX_POLL_FDS {
-		log.errorf("too many poll descriptors (max={}): {}", AUDIO_MAX_POLL_FDS, res)
-		return 0, false
-	} else {
-		return int(res), true
-	}
+audio_get_poll_descriptor_count :: proc(state: ^Audio_State) -> int {
+	return int(alsa.pcm_poll_descriptors_count(state.pcm))
 }
 
 audio_get_poll_descriptors :: proc(state: ^Audio_State, pfds: []posix.pollfd) -> (ok: bool) {
@@ -795,37 +984,24 @@ audio_get_poll_descriptors :: proc(state: ^Audio_State, pfds: []posix.pollfd) ->
 	}
 }
 
-audio_append_poll_descriptors :: proc(
-	state: ^Audio_State,
-	pfds: ^[dynamic]posix.pollfd,
-) -> (
-	audio_pfds: []posix.pollfd,
-	ok: bool,
-) {
-	nfds := audio_get_poll_descriptor_count(state) or_return
-	init_len := len(pfds)
-	if err := resize(pfds, init_len + nfds); err != nil do return nil, false
-	audio_pfds = pfds[:init_len][:nfds]
-	audio_get_poll_descriptors(state, audio_pfds) or_return
-	return audio_pfds, true
-}
-
-audio_handle_poll :: proc(
-	state: ^Audio_State,
-	pfds: []posix.pollfd,
-	input: Game_Input,
-) -> Audio_Error {
+audio_handle_poll :: proc(state: ^State, pfds: []posix.pollfd) -> Audio_Error {
 	revents: posix.Poll_Event
-	if err := alsa.pcm_poll_descriptors_revents(state.pcm, &pfds[0], c.uint(len(pfds)), &revents);
-	   err != 0 {
+	if err := alsa.pcm_poll_descriptors_revents(
+		state.audio.pcm,
+		&pfds[0],
+		c.uint(len(pfds)),
+		&revents,
+	); err != 0 {
 		log.error("failed to get poll descriptor revents:", alsa.strerror(err))
 		return .Failed
 	}
 
 	if .OUT in revents {
-		return audio_fill_buffer(state, input)
+		// return audio_fill_buffer(state)
+		return nil
+	} else {
+		return nil
 	}
-	return nil
 }
 
 // Timers

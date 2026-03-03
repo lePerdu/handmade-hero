@@ -19,6 +19,7 @@ Pcm_Mode :: enum c.int {
 }
 
 Pcm_Hw_Params :: distinct rawptr
+Pcm_Sw_Params :: distinct rawptr
 
 Pcm_Access :: enum c.int {
 	MMAP_INTERLEAVED = 0,
@@ -192,6 +193,24 @@ foreign asound {
 	pcm_set_params :: proc(pcm: Pcm, format: Pcm_Format, access: Pcm_Access, channels: c.uint, rate: c.uint, soft_resample: Pcm_Resample, latency: c.uint) -> c.int ---
 
 	@(link_prefix = "snd_")
+	pcm_sw_params_sizeof :: proc() -> c.size_t ---
+
+	@(link_prefix = "snd_")
+	pcm_sw_params_current :: proc(pcm: Pcm, params: ^Pcm_Sw_Params) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_sw_params :: proc(pcm: Pcm, params: ^Pcm_Sw_Params) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_sw_params_set_start_threshold :: proc(pcm: Pcm, params: ^Pcm_Sw_Params, val: Pcm_Uframes) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_sw_params_set_stop_threshold :: proc(pcm: Pcm, params: ^Pcm_Sw_Params, val: Pcm_Uframes) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_sw_params_set_silence_size :: proc(pcm: Pcm, params: ^Pcm_Sw_Params, val: Pcm_Uframes) -> c.int ---
+
+	@(link_prefix = "snd_")
 	pcm_writei :: proc(pcm: Pcm, buffer: rawptr, size: Pcm_Uframes) -> Pcm_Sframes ---
 
 	@(link_prefix = "snd_")
@@ -202,6 +221,15 @@ foreign asound {
 
 	@(link_prefix = "snd_")
 	pcm_drop :: proc(pcm: Pcm) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_avail :: proc(pcm: Pcm) -> Pcm_Sframes ---
+
+	@(link_prefix = "snd_")
+	pcm_delay :: proc(pcm: Pcm, delayp: ^Pcm_Sframes) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_avail_delay :: proc(pcm: Pcm, availp: ^Pcm_Sframes, delayp: ^Pcm_Sframes) -> c.int ---
 
 	@(link_prefix = "snd_")
 	pcm_avail_update :: proc(pcm: Pcm) -> Pcm_Sframes ---

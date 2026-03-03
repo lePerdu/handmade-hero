@@ -3,6 +3,7 @@ package main
 import "core:log"
 import "core:math"
 import "core:mem"
+import "vendor:windows/GameInput"
 
 // Enum of the keys we care about
 Key :: enum {
@@ -66,10 +67,13 @@ Frame_Buffer :: struct {
 	stride: u32,
 }
 
-// TOOD: Make non-global
-x_offset, y_offset: f32
+Game_State :: struct {
+	x_offset, y_offset: f32,
+	play_sound:         bool,
+	audio_phase:        f32,
+}
 
-game_render :: proc(fb: Frame_Buffer, input: Game_Input, dt_ns: i64) {
+game_update :: proc(state: ^Game_State, input: Game_Input, dt_ns: i64) {
 	// rate=24p/s
 	rate: f32 : 24.0
 	x_rate: f32 = 0.0
@@ -80,10 +84,14 @@ game_render :: proc(fb: Frame_Buffer, input: Game_Input, dt_ns: i64) {
 	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed do x_rate += rate
 	if input.keyboard[.S].end_pressed || input.keyboard[.Down].end_pressed do y_rate -= rate
 	if input.keyboard[.D].end_pressed || input.keyboard[.Right].end_pressed do x_rate -= rate
-	x_offset += f32(dt_ns) * x_rate / 1_000_000_000.0
-	y_offset += f32(dt_ns) * y_rate / 1_000_000_000.0
+	state.x_offset += f32(dt_ns) * x_rate / 1_000_000_000.0
+	state.y_offset += f32(dt_ns) * y_rate / 1_000_000_000.0
 
-	render_gradient(fb, int(x_offset), int(y_offset))
+	state.play_sound = input.keyboard[.Space].end_pressed
+}
+
+game_render :: proc(state: ^Game_State, fb: Frame_Buffer) {
+	render_gradient(fb, int(state.x_offset), int(state.y_offset))
 }
 
 Pixel :: distinct u32
@@ -112,11 +120,13 @@ Audio_Frame :: struct #packed {
 	r: i16,
 }
 
-global_phase: f32
-
-game_render_audio :: proc(buffer: []Audio_Frame, input: Game_Input) {
-	play_sound := input.keyboard[.Space].end_pressed
-	generate_sine(buffer, freq = 420.0, amp = play_sound ? 0.2 : 0.0, phase = &global_phase)
+game_render_audio :: proc(state: ^Game_State, buffer: []Audio_Frame) {
+	generate_sine(
+		buffer,
+		freq = 420.0,
+		amp = state.play_sound ? 0.2 : 0.0,
+		phase = &state.audio_phase,
+	)
 }
 
 generate_sine :: proc(frame_buf: []Audio_Frame, freq: f32, amp: f32, phase: ^f32) {
