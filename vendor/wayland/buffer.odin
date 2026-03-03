@@ -1,7 +1,6 @@
 package wayland
 
 import "base:runtime"
-import "core:io"
 import "core:mem"
 
 // Growable I/O buffer

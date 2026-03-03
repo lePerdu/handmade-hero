@@ -2,18 +2,13 @@ package wayland
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:bytes"
 import "core:c"
 import "core:container/queue"
-import "core:crypto/_aes/hw_intel"
 import "core:io"
 import "core:log"
 import "core:mem"
 import "core:os"
-import "core:os/os2"
 import "core:path/filepath"
-import "core:slice"
-import "core:sys/linux"
 import "core:sys/posix"
 
 ID_Allocator :: struct {
@@ -46,7 +41,9 @@ id_allocator_alloc :: proc(id_alloc: ^ID_Allocator) -> (Object_Id, bool) {
 }
 
 id_allocator_free :: proc(id_alloc: ^ID_Allocator, id: Object_Id) -> runtime.Allocator_Error {
-	if id == id_alloc.last_used_id {
+	if id == OBJECT_ID_NIL {
+		return nil
+	} else if id == id_alloc.last_used_id {
 		id_alloc.last_used_id -= 1
 		return nil
 	} else if MIN_CLIENT_ID <= id && id <= MAX_CLIENT_ID {
