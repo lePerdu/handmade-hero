@@ -1,9 +1,7 @@
 package main
 
-import "core:log"
 import "core:math"
 import "core:mem"
-import "vendor:windows/GameInput"
 
 // Enum of the keys we care about
 Key :: enum {
@@ -70,6 +68,7 @@ Frame_Buffer :: struct {
 Game_State :: struct {
 	x_offset, y_offset: f32,
 	play_sound:         bool,
+	audio_vol:          f32,
 	audio_phase:        f32,
 }
 
@@ -115,30 +114,60 @@ render_gradient :: proc(fb: Frame_Buffer, x_offset, y_offset: int) {
 	}
 }
 
+Audio_Output_Config :: struct {
+	// Samples/sec
+	sample_rate: uint,
+}
+
 Audio_Frame :: struct #packed {
 	l: i16,
 	r: i16,
 }
 
-game_render_audio :: proc(state: ^Game_State, buffer: []Audio_Frame) {
+VOLUME :: 0.2
+ATTACK_MS :: 500.0
+
+game_render_audio :: proc(
+	state: ^Game_State,
+	output_config: Audio_Output_Config,
+	buffer: []Audio_Frame,
+) {
 	generate_sine(
+		output_config,
 		buffer,
 		freq = 420.0,
-		amp = state.play_sound ? 0.2 : 0.0,
+		amp = &state.audio_vol,
+		amp_target = state.play_sound ? VOLUME : 0.0,
 		phase = &state.audio_phase,
 	)
 }
 
-generate_sine :: proc(frame_buf: []Audio_Frame, freq: f32, amp: f32, phase: ^f32) {
-	sample_amp := f32(max(i16)) * amp
-	dt := math.TAU / SAMPLE_RATE * freq
+generate_sine :: proc(
+	output_config: Audio_Output_Config,
+	frame_buf: []Audio_Frame,
+	freq: f32,
+	amp: ^f32,
+	amp_target: f32,
+	phase: ^f32,
+) {
+	dt := math.TAU / f32(output_config.sample_rate) * freq
+	// amplitude increment for each sample in order to go from 0->VOLUME in ATTACK_MS
+	amp_inc := VOLUME / (ATTACK_MS / 1000.0) / f32(output_config.sample_rate)
 
 	t: f32 = phase^
+	cur_amp: f32 = amp^
 	for _, index in frame_buf {
+		if cur_amp <= amp_target {
+			cur_amp = min(cur_amp + amp_inc, amp_target)
+		} else {
+			cur_amp = max(cur_amp - amp_inc, amp_target)
+		}
+		sample_amp := f32(max(i16)) * cur_amp
 		sample := sample_amp * math.sin(t)
 		frame_buf[index] = {i16(sample), i16(sample)}
 		t += dt
 		if t > math.TAU do t -= math.TAU
 	}
 	phase^ = t
+	amp^ = cur_amp
 }
