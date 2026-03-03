@@ -3,10 +3,10 @@
     "label": "Debug",
     "adapter": "CodeLLDB",
     "request": "launch",
-    "program": "handmade",
+    "program": "handmade-hero",
     "build": {
-      "command": "odin build . -debug"
-    }
+      "command": "odin build . -debug",
+    },
   },
   {
     "label": "Debug scanner",
@@ -15,7 +15,7 @@
     "program": "scanner",
     "args": ["/usr/share/wayland/wayland.xml", "wayland/wayland_protocol.odin"],
     "build": {
-      "command": "odin build wayland/scanner -debug"
-    }
-  }
+      "command": "odin build wayland/scanner -debug",
+    },
+  },
 ]
