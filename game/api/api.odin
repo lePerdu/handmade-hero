@@ -6,16 +6,19 @@ import "core:dynlib"
 // between share library loads
 Memory :: distinct rawptr
 
-Init_Proc :: #type proc "c" (memory: Memory, memory_len: int)
+Init_Proc :: #type proc "contextless" (memory: Memory, memory_len: int)
 // TODO: Can these use the odin calling convention even when coming from a
 // shared library?
-Update_Proc :: #type proc "c" (memory: Memory, input: ^Input, dt_ns: i64)
-Render_Proc :: #type proc "c" (memory: Memory, fb: ^Frame_Buffer)
-Render_Audio_Proc :: #type proc "c" (
+Update_Proc :: #type proc "contextless" (
 	memory: Memory,
-	timings: ^Audio_Timings,
-	buffer: [^]Audio_Frame,
-	buffer_len: int,
+	input: Input,
+	dt_ns: i64,
+)
+Render_Proc :: #type proc "contextless" (memory: Memory, fb: Frame_Buffer)
+Render_Audio_Proc :: #type proc "contextless" (
+	memory: Memory,
+	timings: Audio_Timings,
+	buffer: []Audio_Frame,
 )
 
 // Symbol table for use with core:dynlib.initialize_symbols
@@ -34,14 +37,17 @@ dummy_symbol_table := Symbol_Table {
 	render_audio = dummy_render_audio,
 }
 
-dummy_init :: proc "c" (memory: Memory, memory_len: int) {}
-dummy_update :: proc "c" (memory: Memory, input: ^Input, dt_ns: i64) {}
-dummy_render :: proc "c" (memory: Memory, fb: ^Frame_Buffer) {}
-dummy_render_audio :: proc "c" (
+dummy_init :: proc "contextless" (memory: Memory, memory_len: int) {}
+dummy_update :: proc "contextless" (
 	memory: Memory,
-	timings: ^Audio_Timings,
-	buffer: [^]Audio_Frame,
-	buffer_len: int,
+	input: Input,
+	dt_ns: i64,
+) {}
+dummy_render :: proc "contextless" (memory: Memory, fb: Frame_Buffer) {}
+dummy_render_audio :: proc "contextless" (
+	memory: Memory,
+	timings: Audio_Timings,
+	buffer: []Audio_Frame,
 ) {}
 
 Input :: struct {

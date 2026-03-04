@@ -113,7 +113,7 @@ game_loop :: proc(state: ^State) {
 	last_render_time_ns: i64
 
 	if fb, ok := display_get_back_buffer(&state.display); ok {
-		state.game_symbols.render(state.game_memory, &fb)
+		state.game_symbols.render(state.game_memory, fb)
 		last_render_time_ns = get_perf_counter_wall_ns()
 		display_submit_first_frame(&state.display)
 	} else {
@@ -170,7 +170,7 @@ game_loop :: proc(state: ^State) {
 			input := game_api.Input{state.display.keyboard_input}
 			state.game_symbols.update(
 				state.game_memory,
-				&input,
+				input,
 				now - last_update_time_ns,
 			)
 			game_api.keyboard_input_reset(&state.display.keyboard_input)
@@ -181,7 +181,7 @@ game_loop :: proc(state: ^State) {
 		// TODO: Render at a fixed rate even if some frames won't be presented?
 		if state.display.last_frame_time_ns > last_render_time_ns {
 			if fb, ok := display_get_back_buffer(&state.display); ok {
-				state.game_symbols.render(state.game_memory, &fb)
+				state.game_symbols.render(state.game_memory, fb)
 				last_render_time_ns = get_perf_counter_wall_ns()
 				// TODO: Fix/remove time for first frame, since it is incorrect
 				log.debugf(
@@ -1312,12 +1312,7 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 			write_timestamp_ns = write_timestamp_ns,
 			sample_rate = audio.sample_rate,
 		}
-		state.game_symbols.render_audio(
-			state.game_memory,
-			&timings,
-			raw_data(frame_buf),
-			len(frame_buf),
-		)
+		state.game_symbols.render_audio(state.game_memory, timings, frame_buf)
 
 		if err := alsa.pcm_mmap_commit(audio.pcm, offset, space); err < 0 {
 			log.error("failed to commit mmap area:", alsa.strerror(i32(err)))

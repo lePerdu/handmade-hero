@@ -15,7 +15,10 @@ State :: struct {
 }
 
 @(export)
-handmade_game_init :: proc "c" (memory: api.Memory, memory_len: int) {
+handmade_game_init :: proc "contextless" (
+	memory: api.Memory,
+	memory_len: int,
+) {
 	// TODO: Return error code instead
 	assert_contextless(memory_len >= size_of(State))
 	state := (^State)(memory)
@@ -28,9 +31,9 @@ handmade_game_init :: proc "c" (memory: api.Memory, memory_len: int) {
 }
 
 @(export)
-handmade_game_update :: proc "c" (
+handmade_game_update :: proc "contextless" (
 	memory: api.Memory,
-	input: ^api.Input,
+	input: api.Input,
 	dt_ns: i64,
 ) {
 	state := (^State)(memory)
@@ -53,10 +56,13 @@ handmade_game_update :: proc "c" (
 }
 
 @(export)
-handmade_game_render :: proc "c" (memory: api.Memory, fb: ^api.Frame_Buffer) {
+handmade_game_render :: proc "contextless" (
+	memory: api.Memory,
+	fb: api.Frame_Buffer,
+) {
 	state := (^State)(memory)
 	context = state.game_context
-	render_gradient(fb^, int(state.x_offset), int(state.y_offset))
+	render_gradient(fb, int(state.x_offset), int(state.y_offset))
 }
 
 Pixel :: distinct u32
@@ -91,18 +97,17 @@ VOLUME :: 0.2
 ATTACK_MS :: 50.0
 
 @(export)
-handmade_game_render_audio :: proc "c" (
+handmade_game_render_audio :: proc "contextless" (
 	memory: api.Memory,
-	timings: ^api.Audio_Timings,
-	buffer: [^]api.Audio_Frame,
-	buffer_len: int,
+	timings: api.Audio_Timings,
+	buffer: []api.Audio_Frame,
 ) {
 	state := (^State)(memory)
 	context = state.game_context
 
 	generate_sine(
-		timings^,
-		buffer[0:buffer_len],
+		timings,
+		buffer,
 		freq = 420.0,
 		amp = &state.audio_vol,
 		amp_target = state.play_sound ? VOLUME : 0.0,
