@@ -122,6 +122,11 @@ Pcm_Resample :: enum c.uint {
 	Enable  = 1,
 }
 
+Pcm_Pause :: enum c.int {
+	Resume = 0,
+	Pause  = 1,
+}
+
 PCM_WAIT_INDEFINITE: c.int : -1
 PCM_WAIT_IO: c.int : -10001
 PCM_WAIT_DRAIN: c.int : -10002
@@ -188,6 +193,9 @@ foreign asound {
 	pcm_start :: proc(pcm: Pcm) -> c.int ---
 
 	@(link_prefix = "snd_")
+	pcm_pause :: proc(pcm: Pcm, enable: Pcm_Pause) -> c.int ---
+
+	@(link_prefix = "snd_")
 	pcm_get_params :: proc(pcm: Pcm, buffer_size: ^Pcm_Uframes, period_size: ^Pcm_Uframes) -> c.int ---
 
 	@(link_prefix = "snd_")
@@ -230,6 +238,12 @@ foreign asound {
 
 	@(link_prefix = "snd_")
 	pcm_hw_params_get_buffer_size :: proc(params: Pcm_Hw_Params, val: ^Pcm_Uframes) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_can_pause :: proc(params: Pcm_Hw_Params) -> c.int ---
+
+	@(link_prefix = "snd_")
+	pcm_hw_params_can_resume :: proc(params: Pcm_Hw_Params) -> c.int ---
 
 	// SW Params
 

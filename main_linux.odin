@@ -124,6 +124,8 @@ game_loop :: proc(state: ^State) {
 		return
 	}
 
+	paused := false
+
 	for !state.display.close_requested {
 		reload_game_symbols(state)
 
@@ -162,45 +164,60 @@ game_loop :: proc(state: ^State) {
 		   0 {
 			break
 		}
-
-		// TODO: Simulate at fixed DT? Would require running this potentially
-		// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
-		if now := get_perf_counter_wall_ns(); now >= next_update_time_ns {
-			// TODO: Don't create the Game_Input object every time
-			input := game_api.Input{state.display.keyboard_input}
-			state.game_symbols.update(
-				state.game_memory,
-				input,
-				now - last_update_time_ns,
-			)
+		if game_api.button_input_press_count_odd(
+			state.display.keyboard_input[.Pause],
+		) {
 			game_api.keyboard_input_reset(&state.display.keyboard_input)
-			last_update_time_ns = now
-		}
-
-		// Only render after the previous frame is presented
-		// TODO: Render at a fixed rate even if some frames won't be presented?
-		if state.display.last_frame_time_ns > last_render_time_ns {
-			if fb, ok := display_get_back_buffer(&state.display); ok {
-				state.game_symbols.render(state.game_memory, fb)
-				last_render_time_ns = get_perf_counter_wall_ns()
-				// TODO: Fix/remove time for first frame, since it is incorrect
-				log.debugf(
-					"render time: {}ms",
-					f64(
-						last_render_time_ns - state.display.last_frame_time_ns,
-					) /
-					1_000_000.0,
-				)
-				display_submit_frame(&state.display)
+			if paused {
+				paused = false
+				audio_resume(&state.audio)
 			} else {
-				log.warn(
-					"back buffer not ready for rendering:",
-					state.display.buffers[state.display.back_buffer_index].wl_buffer,
-				)
+				paused = true
+				audio_pause(&state.audio)
 			}
 		}
 
-		audio_handle_poll(state, audio_poll_fds) or_break
+		if !paused {
+			// TODO: Simulate at fixed DT? Would require running this potentially
+			// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
+			if now := get_perf_counter_wall_ns(); now >= next_update_time_ns {
+				// TODO: Don't create the Game_Input object every time
+				input := game_api.Input{state.display.keyboard_input}
+				state.game_symbols.update(
+					state.game_memory,
+					input,
+					now - last_update_time_ns,
+				)
+				game_api.keyboard_input_reset(&state.display.keyboard_input)
+				last_update_time_ns = now
+			}
+
+			// Only render after the previous frame is presented
+			// TODO: Render at a fixed rate even if some frames won't be presented?
+			if state.display.last_frame_time_ns > last_render_time_ns {
+				if fb, ok := display_get_back_buffer(&state.display); ok {
+					state.game_symbols.render(state.game_memory, fb)
+					last_render_time_ns = get_perf_counter_wall_ns()
+					// TODO: Fix/remove time for first frame, since it is incorrect
+					log.debugf(
+						"render time: {}ms",
+						f64(
+							last_render_time_ns -
+							state.display.last_frame_time_ns,
+						) /
+						1_000_000.0,
+					)
+					display_submit_frame(&state.display)
+				} else {
+					log.warn(
+						"back buffer not ready for rendering:",
+						state.display.buffers[state.display.back_buffer_index].wl_buffer,
+					)
+				}
+			}
+
+			audio_handle_poll(state, audio_poll_fds) or_break
+		}
 
 		free_all(context.temp_allocator)
 
@@ -865,6 +882,8 @@ KEY_W :: 17
 KEY_A :: 30
 KEY_S :: 31
 KEY_D :: 32
+KEY_P :: 25
+KEY_PAUSE_BREAK :: 119
 
 KEY_UP :: 103
 KEY_LEFT :: 105
@@ -903,6 +922,8 @@ scancode_to_key :: proc(code: u32) -> (game_api.Key, bool) {
 		return .Space, true
 	case KEY_ESC:
 		return .Esc, true
+	case KEY_P, KEY_PAUSE_BREAK:
+		return .Pause, true
 	case:
 		return {}, false
 	}
@@ -1021,6 +1042,7 @@ Audio_State :: struct {
 	buffer_size: alsa.Pcm_Uframes,
 	period_size: alsa.Pcm_Uframes,
 	sample_rate: uint,
+	supports_pause: bool,
 }
 
 Audio_Error :: enum {
@@ -1029,7 +1051,7 @@ Audio_Error :: enum {
 }
 
 audio_init :: proc(state: ^Audio_State) -> Audio_Error {
-	if err := alsa.pcm_open(&state.pcm, "default", .Playback, .Block);
+	if err := alsa.pcm_open(&state.pcm, "default", .Playback, .Nonblock);
 	   err != 0 {
 		log.error("failed to open audio device:", alsa.strerror(err))
 		return .Failed
@@ -1121,6 +1143,10 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 		log.error("audio: failed to set buffer time:", alsa.strerror(err))
 		return .Failed
 	}
+
+	state.supports_pause =
+		alsa.pcm_hw_params_can_pause(hw_params) == 1 &&
+		alsa.pcm_hw_params_can_resume(hw_params) == 1
 
 	if err := alsa.pcm_hw_params_get_buffer_size(
 		hw_params,
@@ -1255,6 +1281,7 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 		avail: alsa.Pcm_Sframes
 		delay: alsa.Pcm_Sframes
 		if err := alsa.pcm_avail_delay(audio.pcm, &avail, &delay); err != 0 {
+			log.error("failed to update available space:", alsa.strerror(err))
 			if err := alsa.pcm_recover(
 				audio.pcm,
 				err,
@@ -1361,6 +1388,39 @@ audio_get_poll_descriptors :: proc(
 	} else {
 		log.warnf("got too few poll FDs: expected={} got={}", len(pfds), res)
 		return true
+	}
+}
+
+audio_pause :: proc(state: ^Audio_State) {
+	if state.supports_pause {
+		if err := alsa.pcm_pause(state.pcm, .Pause); err == 0 {
+			return
+		} else {
+			log.warn("failed to pause audio stream:", alsa.strerror(err))
+		}
+	}
+
+	// Fallback
+	if err := alsa.pcm_drain(state.pcm); err != 0 {
+		log.warn("failed to drain audio stream:", alsa.strerror(err))
+	}
+}
+
+audio_resume :: proc(state: ^Audio_State) {
+	if state.supports_pause {
+		if err := alsa.pcm_pause(state.pcm, .Resume); err == 0 {
+			return
+		} else {
+			log.warn("failed to resume audio stream:", alsa.strerror(err))
+		}
+	}
+
+	// Fallback
+	if err := alsa.pcm_prepare(state.pcm); err != 0 {
+		log.warn(
+			"failed to prepare audio stream for resuming:",
+			alsa.strerror(err),
+		)
 	}
 }
 

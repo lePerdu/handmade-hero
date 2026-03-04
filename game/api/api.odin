@@ -85,6 +85,7 @@ Key :: enum {
 	Down,
 	Space,
 	Esc,
+	Pause,
 }
 
 Button_Input :: struct {
@@ -108,6 +109,10 @@ button_input_press_count :: proc(button: Button_Input) -> u32 {
 		// 3->1
 		return button.transitions / 2
 	}
+}
+
+button_input_press_count_odd :: proc(button: Button_Input) -> bool {
+	return button_input_press_count(button) % 2 == 1
 }
 
 button_input_update :: proc(button: ^Button_Input, pressed: bool) {
