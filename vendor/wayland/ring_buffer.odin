@@ -7,10 +7,10 @@ import "core:io"
 // TODO: Just use bytes.Buffer and container/queue for the various use-cases?
 // This doesn't need to copy data as often as bytes.Buffer, but having data always be contiguous is nice
 Ring_Buffer :: struct($T: typeid) {
-	data:      []T,
+	data: []T,
 	allocator: runtime.Allocator,
-	head:      int,
-	size:      int,
+	head: int,
+	size: int,
 }
 
 @(private)
@@ -76,10 +76,17 @@ ring_write :: proc(ring: ^Ring_Buffer($T), buf: []T) -> (n_written: int) {
 	return
 }
 
-ring_ensure_space :: proc(ring: ^Ring_Buffer($T), space: int) -> runtime.Allocator_Error {
+ring_ensure_space :: proc(
+	ring: ^Ring_Buffer($T),
+	space: int,
+) -> runtime.Allocator_Error {
 	req_size := ring.size + space
 	if req_size > len(ring.data) {
-		new_data, err := make([]T, ring_pow2_size(req_size, min_size = ring.size), ring.allocator)
+		new_data, err := make(
+			[]T,
+			ring_pow2_size(req_size, min_size = ring.size),
+			ring.allocator,
+		)
 		if err != .None do return err
 		// Copy existing data to the front for simplicity
 		n_copied := ring_read(ring, new_data)
@@ -90,14 +97,20 @@ ring_ensure_space :: proc(ring: ^Ring_Buffer($T), space: int) -> runtime.Allocat
 	return .None
 }
 
-ring_write_expand :: proc(ring: ^Ring_Buffer($T), buf: []T) -> runtime.Allocator_Error {
+ring_write_expand :: proc(
+	ring: ^Ring_Buffer($T),
+	buf: []T,
+) -> runtime.Allocator_Error {
 	ring_ensure_space(ring, len(buf))
 	n_written := ring_write(ring, buf)
 	assert(n_writte == len(buf))
 	return .None
 }
 
-ring_append :: proc(ring: ^Ring_Buffer($T), elem: T) -> runtime.Allocator_Error {
+ring_append :: proc(
+	ring: ^Ring_Buffer($T),
+	elem: T,
+) -> runtime.Allocator_Error {
 	err := ring_ensure_space(ring, 1)
 	if err != .None do return err
 	ring.data[ring_wrap(ring, ring.head + ring.size)] = elem
@@ -111,7 +124,11 @@ ring_remove :: proc(ring: ^Ring_Buffer($T)) -> (T, bool) {
 	return ring.data[ring_wrap(ring, ring.head + ring.size)], true
 }
 
-ring_slice :: proc(ring: Ring_Buffer($T), start: int, end: int) -> Ring_Buffer(T) {
+ring_slice :: proc(
+	ring: Ring_Buffer($T),
+	start: int,
+	end: int,
+) -> Ring_Buffer(T) {
 	assert(start >= 0)
 	assert(start < ring.size)
 	assert(end > start)

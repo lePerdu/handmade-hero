@@ -6,48 +6,48 @@ import "core:strconv"
 import "core:strings"
 
 Protocol :: struct {
-	filename:   string,
-	name:       string,
-	copyright:  string,
+	filename: string,
+	name: string,
+	copyright: string,
 	interfaces: [dynamic]Interface,
 
 	// Keep reference to the XML document so it can be freed later
-	xml_doc:    ^xml.Document `fmt:"-"`,
+	xml_doc: ^xml.Document `fmt:"-"`,
 }
 
 // TODO: Parse descriptions
 Descrition :: struct {
 	summary: string,
-	body:    string,
+	body: string,
 }
 
 Version :: u32
 
 Interface :: struct {
-	name:        string,
-	name_upper:  string,
-	name_snake:  string,
-	name_ada:    string,
-	version:     Version,
+	name: string,
+	name_upper: string,
+	name_snake: string,
+	name_ada: string,
+	version: Version,
 	description: Descrition,
-	enums:       [dynamic]Enum,
-	requests:    [dynamic]Message,
-	events:      [dynamic]Message,
+	enums: [dynamic]Enum,
+	requests: [dynamic]Message,
+	events: [dynamic]Message,
 }
 
 Enum :: struct {
-	name:        string,
-	name_ada:    string,
+	name: string,
+	name_ada: string,
 	description: Descrition,
-	since:       Version,
-	bitfield:    bool,
-	entries:     [dynamic]Enum_Entry,
+	since: Version,
+	bitfield: bool,
+	entries: [dynamic]Enum_Entry,
 }
 
 Enum_Entry :: struct {
-	name:        string,
-	name_ada:    string,
-	value:       u32,
+	name: string,
+	name_ada: string,
+	value: u32,
 	description: Descrition,
 }
 
@@ -62,19 +62,19 @@ Message_Type :: enum {
 
 // request or event
 Message :: struct {
-	name:        string,
-	name_upper:  string,
-	name_snake:  string,
-	name_ada:    string,
-	type:        Message_Type,
-	since:       Version,
+	name: string,
+	name_upper: string,
+	name_snake: string,
+	name_ada: string,
+	type: Message_Type,
+	since: Version,
 	description: Descrition,
-	args:        [dynamic]Argument,
+	args: [dynamic]Argument,
 }
 
 Argument :: struct {
-	name:        string,
-	type:        Arg_Type,
+	name: string,
+	type: Arg_Type,
 	// TODO: Parse/handle allow-null
 	description: Descrition,
 }
@@ -89,13 +89,20 @@ Primitive_Type :: enum {
 }
 
 Object_Type :: struct {
-	interface:     string,
+	interface: string,
 	interface_ada: string,
-	is_new:        bool,
+	is_new: bool,
 }
 
-object_type_make :: proc(interface: string, is_new: bool = false) -> Object_Type {
-	return {interface = interface, interface_ada = strings.to_ada_case(interface), is_new = is_new}
+object_type_make :: proc(
+	interface: string,
+	is_new: bool = false,
+) -> Object_Type {
+	return {
+		interface = interface,
+		interface_ada = strings.to_ada_case(interface),
+		is_new = is_new,
+	}
 }
 
 Enum_Type :: struct {
@@ -162,7 +169,12 @@ protocol_load :: proc(filename: string) -> (Protocol, Load_Error) {
 	return proto, nil
 }
 
-parse_protocol :: proc(doc: ^xml.Document) -> (proto: Protocol, err: Parse_Error) {
+parse_protocol :: proc(
+	doc: ^xml.Document,
+) -> (
+	proto: Protocol,
+	err: Parse_Error,
+) {
 	proto.xml_doc = doc
 	if doc.elements[0].ident != "protocol" {
 		err = .Unexpected_Tag
@@ -176,17 +188,23 @@ parse_protocol :: proc(doc: ^xml.Document) -> (proto: Protocol, err: Parse_Error
 		return
 	}
 
-	get_copyright: if copyright_el, found := xml.find_child_by_ident(doc, 0, "copyright"); found {
+	get_copyright: if copyright_el, found := xml.find_child_by_ident(
+		doc,
+		0,
+		"copyright",
+	); found {
 		if len(doc.elements[copyright_el].value) == 0 {
 			break get_copyright
 		}
-		if body, is_string := doc.elements[copyright_el].value[0].(string); is_string {
+		if body, is_string := doc.elements[copyright_el].value[0].(string);
+		   is_string {
 			proto.copyright = body
 		}
 	}
 
 	for nth := 0;; nth += 1 {
-		if id, found := xml.find_child_by_ident(doc, 0, "interface", nth); found {
+		if id, found := xml.find_child_by_ident(doc, 0, "interface", nth);
+		   found {
 			new_iface: Interface
 			new_iface, err = parse_interface(doc, id)
 			if err != nil {
@@ -207,8 +225,13 @@ parse_description_of :: proc(
 	desc: Descrition,
 	err: Parse_Error,
 ) {
-	if desc_el, found := xml.find_child_by_ident(doc, elem, "description"); found {
-		desc.summary, _ = xml.find_attribute_val_by_key(doc, desc_el, "summary")
+	if desc_el, found := xml.find_child_by_ident(doc, elem, "description");
+	   found {
+		desc.summary, _ = xml.find_attribute_val_by_key(
+			doc,
+			desc_el,
+			"summary",
+		)
 		if len(doc.elements[desc_el].value) == 0 do return
 		desc.body, _ = doc.elements[desc_el].value[0].(string)
 	} else {
@@ -238,7 +261,11 @@ parse_interface :: proc(
 
 	iface.description = parse_description_of(doc, elem) or_return
 
-	if version_str, found := xml.find_attribute_val_by_key(doc, elem, "version"); found {
+	if version_str, found := xml.find_attribute_val_by_key(
+		doc,
+		elem,
+		"version",
+	); found {
 		version, ok := strconv.parse_u64(version_str, 10)
 		// TODO: Is there a constant for maximum int sizes?
 		if !ok || version >= (1 << 32) {
@@ -252,7 +279,8 @@ parse_interface :: proc(
 	}
 
 	for nth := 0;; nth += 1 {
-		if enum_elem, found := xml.find_child_by_ident(doc, elem, "enum", nth); found {
+		if enum_elem, found := xml.find_child_by_ident(doc, elem, "enum", nth);
+		   found {
 			new: Enum
 			new, err = parse_enum(doc, enum_elem)
 			if err != nil {
@@ -266,7 +294,12 @@ parse_interface :: proc(
 
 
 	for nth := 0;; nth += 1 {
-		if request_elem, found := xml.find_child_by_ident(doc, elem, "request", nth); found {
+		if request_elem, found := xml.find_child_by_ident(
+			doc,
+			elem,
+			"request",
+			nth,
+		); found {
 			new: Message
 			new, err = parse_message(doc, request_elem)
 			if err != nil {
@@ -277,7 +310,12 @@ parse_interface :: proc(
 	}
 
 	for nth := 0;; nth += 1 {
-		if event_elem, found := xml.find_child_by_ident(doc, elem, "event", nth); found {
+		if event_elem, found := xml.find_child_by_ident(
+			doc,
+			elem,
+			"event",
+			nth,
+		); found {
 			new: Message
 			new, err = parse_message(doc, event_elem)
 			if err != nil {
@@ -309,7 +347,8 @@ parse_message :: proc(
 
 	message.description = parse_description_of(doc, elem) or_return
 
-	if version_str, found := xml.find_attribute_val_by_key(doc, elem, "since"); found {
+	if version_str, found := xml.find_attribute_val_by_key(doc, elem, "since");
+	   found {
 		version, ok := strconv.parse_u64(version_str, 10)
 		// TODO: Is there a constant for maximum int sizes?
 		if !ok || version >= (1 << 32) {
@@ -319,7 +358,8 @@ parse_message :: proc(
 		message.since = u32(version)
 	}
 
-	if type_str, found := xml.find_attribute_val_by_key(doc, elem, "type"); found {
+	if type_str, found := xml.find_attribute_val_by_key(doc, elem, "type");
+	   found {
 		switch type_str {
 		case "destructor":
 			message.type = .Destructor
@@ -330,15 +370,22 @@ parse_message :: proc(
 	}
 
 	for nth := 0;; nth += 1 {
-		if arg_elem, found := xml.find_child_by_ident(doc, elem, "arg", nth); found {
+		if arg_elem, found := xml.find_child_by_ident(doc, elem, "arg", nth);
+		   found {
 			new := parse_arg(doc, arg_elem) or_return
 			if obj_type, ok := new.type.(Object_Type);
 			   ok && obj_type.is_new && obj_type.interface == "" {
 				// Have to inject interface and version args in this specific case
 				// (this is what wayland-scanner does)
 				// TODO: Should this only happen for requests?
-				append(&message.args, Argument{name = "interface", type = Primitive_Type.String})
-				append(&message.args, Argument{name = "version", type = Primitive_Type.Uint})
+				append(
+					&message.args,
+					Argument{name = "interface", type = Primitive_Type.String},
+				)
+				append(
+					&message.args,
+					Argument{name = "version", type = Primitive_Type.Uint},
+				)
 			}
 			append(&message.args, new)
 		} else {
@@ -348,7 +395,13 @@ parse_message :: proc(
 	return
 }
 
-parse_arg :: proc(doc: ^xml.Document, elem: xml.Element_ID) -> (arg: Argument, err: Parse_Error) {
+parse_arg :: proc(
+	doc: ^xml.Document,
+	elem: xml.Element_ID,
+) -> (
+	arg: Argument,
+	err: Parse_Error,
+) {
 	if name, found := xml.find_attribute_val_by_key(doc, elem, "name"); found {
 		arg.name = name
 	} else {
@@ -358,7 +411,8 @@ parse_arg :: proc(doc: ^xml.Document, elem: xml.Element_ID) -> (arg: Argument, e
 
 	arg.description = parse_description_of(doc, elem) or_return
 
-	if type_str, found := xml.find_attribute_val_by_key(doc, elem, "type"); found {
+	if type_str, found := xml.find_attribute_val_by_key(doc, elem, "type");
+	   found {
 		switch type_str {
 		case "int":
 			arg.type = .Int
@@ -373,10 +427,18 @@ parse_arg :: proc(doc: ^xml.Document, elem: xml.Element_ID) -> (arg: Argument, e
 		case "array":
 			arg.type = .Array
 		case "object":
-			interface, _ := xml.find_attribute_val_by_key(doc, elem, "interface")
+			interface, _ := xml.find_attribute_val_by_key(
+				doc,
+				elem,
+				"interface",
+			)
 			arg.type = object_type_make(interface)
 		case "new_id":
-			interface, _ := xml.find_attribute_val_by_key(doc, elem, "interface")
+			interface, _ := xml.find_attribute_val_by_key(
+				doc,
+				elem,
+				"interface",
+			)
 			arg.type = object_type_make(interface, is_new = true)
 		case:
 			err = .Invalid_Arg_Type
@@ -387,7 +449,8 @@ parse_arg :: proc(doc: ^xml.Document, elem: xml.Element_ID) -> (arg: Argument, e
 		return
 	}
 
-	if enum_name, found := xml.find_attribute_val_by_key(doc, elem, "enum"); found {
+	if enum_name, found := xml.find_attribute_val_by_key(doc, elem, "enum");
+	   found {
 		allowed_type := false
 		// TODO: Better way to check this?
 		#partial switch arg_type in arg.type {
@@ -409,7 +472,13 @@ parse_arg :: proc(doc: ^xml.Document, elem: xml.Element_ID) -> (arg: Argument, e
 	return
 }
 
-parse_enum :: proc(doc: ^xml.Document, elem: xml.Element_ID) -> (enum_: Enum, err: Parse_Error) {
+parse_enum :: proc(
+	doc: ^xml.Document,
+	elem: xml.Element_ID,
+) -> (
+	enum_: Enum,
+	err: Parse_Error,
+) {
 	if name, found := xml.find_attribute_val_by_key(doc, elem, "name"); found {
 		enum_.name = name
 	} else {
@@ -420,7 +489,8 @@ parse_enum :: proc(doc: ^xml.Document, elem: xml.Element_ID) -> (enum_: Enum, er
 
 	enum_.description = parse_description_of(doc, elem) or_return
 
-	if version_str, found := xml.find_attribute_val_by_key(doc, elem, "since"); found {
+	if version_str, found := xml.find_attribute_val_by_key(doc, elem, "since");
+	   found {
 		version, ok := strconv.parse_u64(version_str, 10)
 		// TODO: Is there a constant for maximum int sizes?
 		if !ok || version >= (1 << 32) {
@@ -430,7 +500,11 @@ parse_enum :: proc(doc: ^xml.Document, elem: xml.Element_ID) -> (enum_: Enum, er
 		enum_.since = u32(version)
 	}
 
-	if bitfield_str, found := xml.find_attribute_val_by_key(doc, elem, "bitfield"); found {
+	if bitfield_str, found := xml.find_attribute_val_by_key(
+		doc,
+		elem,
+		"bitfield",
+	); found {
 		switch bitfield_str {
 		case "true":
 			enum_.bitfield = true
@@ -443,7 +517,12 @@ parse_enum :: proc(doc: ^xml.Document, elem: xml.Element_ID) -> (enum_: Enum, er
 	}
 
 	for nth := 0;; nth += 1 {
-		if entry_elem, found := xml.find_child_by_ident(doc, elem, "entry", nth); found {
+		if entry_elem, found := xml.find_child_by_ident(
+			doc,
+			elem,
+			"entry",
+			nth,
+		); found {
 			new: Enum_Entry
 			new, err = parse_enum_entry(doc, entry_elem)
 			if err != nil {
@@ -472,7 +551,8 @@ parse_enum_entry :: proc(
 
 	entry.description = parse_description_of(doc, elem) or_return
 
-	if value_str, found := xml.find_attribute_val_by_key(doc, elem, "value"); found {
+	if value_str, found := xml.find_attribute_val_by_key(doc, elem, "value");
+	   found {
 		value, ok := strconv.parse_u64(value_str)
 		// TODO: Is there a constant for maximum int sizes?
 		if !ok || value >= (1 << 32) {

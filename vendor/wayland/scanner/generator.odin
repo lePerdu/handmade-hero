@@ -20,7 +20,11 @@ Generate_Error :: union #shared_nil {
 }
 
 generate :: proc(filename: string, proto: Protocol) -> Generate_Error {
-	f := os.open(filename, os.O_WRONLY | os.O_CREATE | os.O_TRUNC, 0o644) or_return
+	f := os.open(
+		filename,
+		os.O_WRONLY | os.O_CREATE | os.O_TRUNC,
+		0o644,
+	) or_return
 	defer os.close(f)
 	raw_writer := os.stream_from_handle(f)
 	buf_writer: bufio.Writer
@@ -43,12 +47,15 @@ generate :: proc(filename: string, proto: Protocol) -> Generate_Error {
 		fmt.wprintln(w, "//", strings.trim_left_space(line))
 	}
 
-	fmt.wprintln(w, `
+	fmt.wprintln(
+		w,
+		`
 package wayland
 
 import "core:log"
 import "core:sys/posix"
-`)
+`,
+	)
 
 	for iface in proto.interfaces {
 		codegen_interface(w, iface)
@@ -79,7 +86,11 @@ compare_enum_value :: proc(a: Enum_Entry, b: Enum_Entry) -> bool {
 	return a.value < b.value
 }
 
-codegen_enum :: proc(w: io.Writer, interface: Interface, enum_: Enum) -> Generate_Error {
+codegen_enum :: proc(
+	w: io.Writer,
+	interface: Interface,
+	enum_: Enum,
+) -> Generate_Error {
 	// bitfields need elements sorted, regular enums are nicer to read when sorted
 	slice.sort_by(enum_.entries[:], compare_enum_value)
 
@@ -124,12 +135,24 @@ codegen_enum :: proc(w: io.Writer, interface: Interface, enum_: Enum) -> Generat
 		}
 		fmt.wprintln(w, "}; u32]")
 	} else {
-		fmt.wprintfln(w, "{}_{}_Enum :: enum u32 {{", interface.name_ada, enum_.name_ada)
+		fmt.wprintfln(
+			w,
+			"{}_{}_Enum :: enum u32 {{",
+			interface.name_ada,
+			enum_.name_ada,
+		)
 		for entry in enum_.entries {
 			codegen_doc_comment(w, entry.description, "\t")
 			// Need to prefix enum names starting with a number
-			prefix := tokenizer.is_letter(utf8.rune_at_pos(entry.name_ada, 0)) ? "" : "_"
-			fmt.wprintfln(w, "\t{}{} = {},", prefix, entry.name_ada, entry.value)
+			prefix :=
+				tokenizer.is_letter(utf8.rune_at_pos(entry.name_ada, 0)) ? "" : "_"
+			fmt.wprintfln(
+				w,
+				"\t{}{} = {},",
+				prefix,
+				entry.name_ada,
+				entry.value,
+			)
 		}
 		fmt.wprintln(w, "}")
 	}
@@ -144,7 +167,13 @@ codegen_request :: proc(
 	index: int,
 ) -> Generate_Error {
 	// TODO: use SCREAMING_SNAKE_CASE for opcodes?
-	fmt.wprintfln(w, "{}_{}_OPCODE: Opcode : {}", interface.name_upper, req.name_upper, index)
+	fmt.wprintfln(
+		w,
+		"{}_{}_OPCODE: Opcode : {}",
+		interface.name_upper,
+		req.name_upper,
+		index,
+	)
 
 	// Start with this, and append argument summaries to the doc comment
 	codegen_doc_comment(w, req.description)
@@ -225,16 +254,28 @@ codegen_request :: proc(
 	}
 
 	// TODO: Check size bounds?
-	fmt.wprintfln(w, "\tmsg_size_: u16 = message_header_size + {}", static_size)
+	fmt.wprintfln(
+		w,
+		"\tmsg_size_: u16 = message_header_size + {}",
+		static_size,
+	)
 	// Add in dynamic size
 	for arg in req.args {
 		#partial switch arg_type in arg.type {
 		case Primitive_Type:
 			#partial switch arg_type {
 			case .String:
-				fmt.wprintfln(w, "\tmsg_size_ += message_string_size(len({}))", arg.name)
+				fmt.wprintfln(
+					w,
+					"\tmsg_size_ += message_string_size(len({}))",
+					arg.name,
+				)
 			case .Array:
-				fmt.wprintfln(w, "\tmsg_size_ += message_array_size(len({}))", arg.name)
+				fmt.wprintfln(
+					w,
+					"\tmsg_size_ += message_array_size(len({}))",
+					arg.name,
+				)
 			}
 		}
 	}
@@ -257,12 +298,20 @@ codegen_request :: proc(
 			#partial switch arg_type {
 			case .Fd:
 				// These are written in the out-of-band Unix socket data
-				fmt.wprintfln(w, "\tconnection_write_fd(conn_, {}) or_return", arg.name)
+				fmt.wprintfln(
+					w,
+					"\tconnection_write_fd(conn_, {}) or_return",
+					arg.name,
+				)
 				continue write_arg_values // skip message_write
 			}
 		case Object_Type:
 			if arg_type.is_new {
-				fmt.wprintfln(w, "\t{} = connection_alloc_id(conn_) or_return", arg.name)
+				fmt.wprintfln(
+					w,
+					"\t{} = connection_alloc_id(conn_) or_return",
+					arg.name,
+				)
 			}
 		}
 		// message_write overloads cover all the cases
@@ -353,7 +402,8 @@ codegen_event :: proc(
 				)
 			}
 
-			arg_type_name := arg_type.interface != "" ? arg_type.interface_ada : "Object_Id"
+			arg_type_name :=
+				arg_type.interface != "" ? arg_type.interface_ada : "Object_Id"
 			fmt.wprintfln(w, "\t{}: {},", arg.name, arg_type_name)
 		case Enum_Type:
 			fmt.wprintf(
@@ -396,20 +446,45 @@ codegen_event :: proc(
 			type_name: string
 			switch arg_type {
 			case .Int:
-				fmt.wprintfln(w, "\tevent.{} = message_read_i32(&reader) or_return", arg.name)
+				fmt.wprintfln(
+					w,
+					"\tevent.{} = message_read_i32(&reader) or_return",
+					arg.name,
+				)
 			case .Uint:
-				fmt.wprintfln(w, "\tevent.{} = message_read_u32(&reader) or_return", arg.name)
+				fmt.wprintfln(
+					w,
+					"\tevent.{} = message_read_u32(&reader) or_return",
+					arg.name,
+				)
 			case .Fixed:
-				fmt.wprintfln(w, "\tevent.{} = message_read_fixed(&reader) or_return", arg.name)
+				fmt.wprintfln(
+					w,
+					"\tevent.{} = message_read_fixed(&reader) or_return",
+					arg.name,
+				)
 			case .String:
-				fmt.wprintfln(w, "\tevent.{} = message_read_string(&reader) or_return", arg.name)
+				fmt.wprintfln(
+					w,
+					"\tevent.{} = message_read_string(&reader) or_return",
+					arg.name,
+				)
 			case .Array:
-				fmt.wprintfln(w, "\tevent.{} = message_read_array(&reader) or_return", arg.name)
+				fmt.wprintfln(
+					w,
+					"\tevent.{} = message_read_array(&reader) or_return",
+					arg.name,
+				)
 			case .Fd:
-				fmt.wprintfln(w, "\tevent.{} = connection_read_fd(conn) or_return", arg.name)
+				fmt.wprintfln(
+					w,
+					"\tevent.{} = connection_read_fd(conn) or_return",
+					arg.name,
+				)
 			}
 		case Object_Type:
-			arg_type_name := arg_type.interface != "" ? arg_type.interface_ada : "Object_Id"
+			arg_type_name :=
+				arg_type.interface != "" ? arg_type.interface_ada : "Object_Id"
 			fmt.wprintfln(
 				w,
 				"\tevent.{} = message_read_object_id(&reader, {}) or_return",
@@ -454,7 +529,10 @@ codegen_event :: proc(
 	return nil
 }
 
-make_enum_type_name :: proc(enum_name: string, default_iface_type_name: string) -> string {
+make_enum_type_name :: proc(
+	enum_name: string,
+	default_iface_type_name: string,
+) -> string {
 	iface_type_name, enum_type_name: string
 	if dot_idx := strings.index_byte(enum_name, '.'); dot_idx > 0 {
 		iface_type_name = strings.to_ada_case(enum_name[:dot_idx])
@@ -464,7 +542,10 @@ make_enum_type_name :: proc(enum_name: string, default_iface_type_name: string) 
 		enum_type_name = strings.to_ada_case(enum_name)
 	}
 	suffix :: "_Enum"
-	sb := strings.builder_make(0, len(iface_type_name) + 1 + len(enum_type_name) + len(suffix))
+	sb := strings.builder_make(
+		0,
+		len(iface_type_name) + 1 + len(enum_type_name) + len(suffix),
+	)
 	strings.write_string(&sb, iface_type_name)
 	strings.write_byte(&sb, '_')
 	strings.write_string(&sb, enum_type_name)
@@ -472,7 +553,11 @@ make_enum_type_name :: proc(enum_name: string, default_iface_type_name: string) 
 	return strings.to_string(sb)
 }
 
-codegen_doc_comment :: proc(w: io.Writer, desc: Descrition, indent := "") -> Generate_Error {
+codegen_doc_comment :: proc(
+	w: io.Writer,
+	desc: Descrition,
+	indent := "",
+) -> Generate_Error {
 	if desc.summary != "" {
 		fmt.wprintfln(w, "{}// {}", indent, desc.summary)
 	}

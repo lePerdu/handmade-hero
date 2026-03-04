@@ -139,11 +139,11 @@ Pcm_Sframes :: c.long
 // PCM area specification
 Pcm_Channel_Area :: struct {
 	// base address of channel samples
-	addr:  rawptr,
+	addr: rawptr,
 	// offset to first sample in bits
 	first: c.uint,
 	// samples distance in bits
-	step:  c.uint,
+	step: c.uint,
 }
 
 Pcm_State :: enum c.int {

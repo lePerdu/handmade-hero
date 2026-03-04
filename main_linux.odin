@@ -12,8 +12,8 @@ import "core:sys/posix"
 
 State :: struct {
 	display: Display_State,
-	audio:   Audio_State,
-	game:    Game_State,
+	audio: Audio_State,
+	game: Game_State,
 }
 
 main :: proc() {
@@ -37,7 +37,10 @@ game_loop :: proc(state: ^State) {
 	{
 		audio_poll_fd_count := audio_get_poll_descriptor_count(&state.audio)
 		display_poll_fd_count := 1
-		poll_fds = make([]posix.pollfd, display_poll_fd_count + audio_poll_fd_count)
+		poll_fds = make(
+			[]posix.pollfd,
+			display_poll_fd_count + audio_poll_fd_count,
+		)
 		offset := 0
 		display_poll_fd = &poll_fds[offset]
 		offset += display_poll_fd_count
@@ -88,10 +91,14 @@ game_loop :: proc(state: ^State) {
 		// display/audio events to process
 		next_update_time_ns := last_update_time_ns + MIN_UPDATE_PERIOD_NS
 		max_wait_time_ms := i32(
-			max(next_update_time_ns - get_perf_counter_cpu_ns(), 0) / 1_000_000,
+			max(next_update_time_ns - get_perf_counter_cpu_ns(), 0) /
+			1_000_000,
 		)
-		if poll_res := posix.poll(&poll_fds[0], posix.nfds_t(len(poll_fds)), max_wait_time_ms);
-		   poll_res == -1 {
+		if poll_res := posix.poll(
+			&poll_fds[0],
+			posix.nfds_t(len(poll_fds)),
+			max_wait_time_ms,
+		); poll_res == -1 {
 			// error
 			log.error("failed to poll for updates:", posix.errno())
 			return
@@ -121,7 +128,10 @@ game_loop :: proc(state: ^State) {
 				// TODO: Fix/remove time for first frame, since it is incorrect
 				log.debugf(
 					"render time: {}ms",
-					f64(last_render_time_ns - state.display.last_frame_time_ns) / 1_000_000.0,
+					f64(
+						last_render_time_ns - state.display.last_frame_time_ns,
+					) /
+					1_000_000.0,
 				)
 				display_submit_frame(&state.display)
 			} else {
@@ -136,9 +146,12 @@ game_loop :: proc(state: ^State) {
 
 		free_all(context.temp_allocator)
 
-		counter_total_wall_ns := get_perf_counter_wall_ns() - counter_start_wall_ns
-		counter_total_cpu_ns := get_perf_counter_cpu_ns() - counter_start_cpu_ns
-		counter_total_cpu_cycles := get_perf_counter_cpu_cycles() - counter_start_cpu_cycles
+		counter_total_wall_ns :=
+			get_perf_counter_wall_ns() - counter_start_wall_ns
+		counter_total_cpu_ns :=
+			get_perf_counter_cpu_ns() - counter_start_cpu_ns
+		counter_total_cpu_cycles :=
+			get_perf_counter_cpu_cycles() - counter_start_cpu_cycles
 
 		log.debugf(
 			"event loop perf counter: wall={}ms cpu={}ms cycles={}K",
@@ -163,50 +176,50 @@ Buffer_State :: enum {
 }
 
 Display_Buffer :: struct {
-	wl_buffer:    wayland.Wl_Buffer,
-	state:        Buffer_State,
+	wl_buffer: wayland.Wl_Buffer,
+	state: Buffer_State,
 	frame_buffer: Frame_Buffer,
 }
 
 Display_State :: struct {
-	conn:                 wayland.Connection,
+	conn: wayland.Connection,
 
 	// Static IDs
-	wl_display:           wayland.Wl_Display,
-	wl_registry:          wayland.Wl_Registry,
+	wl_display: wayland.Wl_Display,
+	wl_registry: wayland.Wl_Registry,
 
 	// Bound IDs from the registry
-	wl_compositor:        wayland.Wl_Compositor,
-	wl_seat:              wayland.Wl_Seat,
-	wl_shm:               wayland.Wl_Shm,
-	xdg_wm_base:          wayland.Xdg_Wm_Base,
+	wl_compositor: wayland.Wl_Compositor,
+	wl_seat: wayland.Wl_Seat,
+	wl_shm: wayland.Wl_Shm,
+	xdg_wm_base: wayland.Xdg_Wm_Base,
 
 	// SHM-related data (pointed is tracked in frame_buffer)
-	shm_fd:               posix.FD,
-	shm_data:             []u8,
+	shm_fd: posix.FD,
+	shm_data: []u8,
 	// TODO: Do these need to be persistend long-term?
-	wl_shm_pool:          wayland.Wl_Shm_Pool,
+	wl_shm_pool: wayland.Wl_Shm_Pool,
 
 	// Window-related objects and data
-	wl_surface:           wayland.Wl_Surface,
-	xdg_surface:          wayland.Xdg_Surface,
-	xdg_toplevel:         wayland.Xdg_Toplevel,
+	wl_surface: wayland.Wl_Surface,
+	xdg_surface: wayland.Xdg_Surface,
+	xdg_toplevel: wayland.Xdg_Toplevel,
 	xdg_configure_serial: Maybe(u32),
-	surface_state:        Surface_State,
-	close_requested:      bool,
-	buffers:              [BUFFER_COUNT]Display_Buffer,
+	surface_state: Surface_State,
+	close_requested: bool,
+	buffers: [BUFFER_COUNT]Display_Buffer,
 	// Index of the buffer which should be used to render the next frame
-	back_buffer_index:    int,
+	back_buffer_index: int,
 
 	// Input
-	wl_keyboard:          wayland.Wl_Keyboard,
-	keyboard_input:       Keyboard_Input,
+	wl_keyboard: wayland.Wl_Keyboard,
+	keyboard_input: Keyboard_Input,
 
 	// Frame state
-	frame_callback:       wayland.Wl_Callback,
-	frame_rate_ns:        i64,
-	last_frame_time_ns:   i64,
-	last_cb_time_ms:      u32,
+	frame_callback: wayland.Wl_Callback,
+	frame_rate_ns: i64,
+	last_frame_time_ns: i64,
+	last_cb_time_ms: u32,
 }
 
 COLOR_CHANNELS :: 4
@@ -231,16 +244,21 @@ display_init :: proc(state: ^Display_State) -> bool {
 	state.wl_display, _ = wayland.connection_alloc_id(&state.conn)
 
 	err: wayland.Conn_Error
-	state.wl_registry, err = wayland.wl_display_get_registry(&state.conn, state.wl_display)
+	state.wl_registry, err = wayland.wl_display_get_registry(
+		&state.conn,
+		state.wl_display,
+	)
 	if err != nil {
 		log.fatal("failed to setup wl_registry:", err)
 		return false
 	}
 
 	// Initial setup event loop to bind to globals
-	for state.wl_compositor == 0 || state.wl_shm == 0 || state.xdg_wm_base == 0 {
+	for state.wl_compositor == 0 ||
+	    state.wl_shm == 0 ||
+	    state.xdg_wm_base == 0 {
 		wayland_socket_poll := posix.pollfd {
-			fd     = state.conn.socket_fd,
+			fd = state.conn.socket_fd,
 			events = {.IN, .OUT},
 		}
 		switch poll_res := posix.poll(&wayland_socket_poll, 1, -1); poll_res {
@@ -258,14 +276,24 @@ display_init :: proc(state: ^Display_State) -> bool {
 
 	// Create window-related objects
 
-	state.wl_surface, _ = wayland.wl_compositor_create_surface(&state.conn, state.wl_compositor)
+	state.wl_surface, _ = wayland.wl_compositor_create_surface(
+		&state.conn,
+		state.wl_compositor,
+	)
 	state.xdg_surface, _ = wayland.xdg_wm_base_get_xdg_surface(
 		&state.conn,
 		state.xdg_wm_base,
 		state.wl_surface,
 	)
-	state.xdg_toplevel, _ = wayland.xdg_surface_get_toplevel(&state.conn, state.xdg_surface)
-	_ = wayland.xdg_toplevel_set_title(&state.conn, state.xdg_toplevel, "Handmade")
+	state.xdg_toplevel, _ = wayland.xdg_surface_get_toplevel(
+		&state.conn,
+		state.xdg_surface,
+	)
+	_ = wayland.xdg_toplevel_set_title(
+		&state.conn,
+		state.xdg_toplevel,
+		"Handmade",
+	)
 	_ = wayland.wl_surface_commit(&state.conn, state.wl_surface)
 
 	display_setup_buffers(state, 640, 480)
@@ -295,7 +323,9 @@ display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
 
 	shm_err: Shm_Error
 	shm_data: []u8
-	state.shm_fd, state.shm_data, shm_err = create_shm_file(BUFFER_COUNT * uint(buffer_size))
+	state.shm_fd, state.shm_data, shm_err = create_shm_file(
+		BUFFER_COUNT * uint(buffer_size),
+	)
 	if shm_err != nil {
 		log.fatal("failed to create SHM file:", posix.strerror())
 		return
@@ -339,7 +369,12 @@ display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
 	)
 }
 
-display_get_back_buffer :: proc(state: ^Display_State) -> (fb: Frame_Buffer, ok: bool) {
+display_get_back_buffer :: proc(
+	state: ^Display_State,
+) -> (
+	fb: Frame_Buffer,
+	ok: bool,
+) {
 	b := &state.buffers[state.back_buffer_index]
 	if b.state == .Attached {
 		return {}, false
@@ -348,7 +383,12 @@ display_get_back_buffer :: proc(state: ^Display_State) -> (fb: Frame_Buffer, ok:
 	}
 }
 
-display_get_poll_descriptor :: proc(state: ^Display_State) -> (poll: posix.pollfd, ok: bool) {
+display_get_poll_descriptor :: proc(
+	state: ^Display_State,
+) -> (
+	poll: posix.pollfd,
+	ok: bool,
+) {
 	return posix.pollfd {
 			fd = state.conn.socket_fd,
 			events = wayland.connection_needs_flush(&state.conn) ? {.IN, .OUT} : {.IN},
@@ -356,7 +396,12 @@ display_get_poll_descriptor :: proc(state: ^Display_State) -> (poll: posix.pollf
 		true
 }
 
-display_handle_poll :: proc(state: ^Display_State, poll: ^posix.pollfd) -> (ok: bool) {
+display_handle_poll :: proc(
+	state: ^Display_State,
+	poll: ^posix.pollfd,
+) -> (
+	ok: bool,
+) {
 	if poll.revents & {.IN, .OUT} == {} {
 		return true
 	}
@@ -369,11 +414,28 @@ display_handle_poll :: proc(state: ^Display_State, poll: ^posix.pollfd) -> (ok: 
 display_submit_frame :: proc(state: ^Display_State) {
 	back_buffer := &state.buffers[state.back_buffer_index]
 
-	wayland.wl_surface_attach(&state.conn, state.wl_surface, back_buffer.wl_buffer, 0, 0)
-	wayland.wl_surface_damage_buffer(&state.conn, state.wl_surface, 0, 0, max(i32), max(i32))
+	wayland.wl_surface_attach(
+		&state.conn,
+		state.wl_surface,
+		back_buffer.wl_buffer,
+		0,
+		0,
+	)
+	wayland.wl_surface_damage_buffer(
+		&state.conn,
+		state.wl_surface,
+		0,
+		0,
+		max(i32),
+		max(i32),
+	)
 
 	if serial, ok := state.xdg_configure_serial.?; ok {
-		_ = wayland.xdg_surface_ack_configure(&state.conn, state.xdg_surface, serial)
+		_ = wayland.xdg_surface_ack_configure(
+			&state.conn,
+			state.xdg_surface,
+			serial,
+		)
 		state.xdg_configure_serial = nil
 	}
 	wayland.wl_surface_commit(&state.conn, state.wl_surface)
@@ -399,7 +461,8 @@ process_wayland_messages :: proc(state: ^Display_State) {
 		// Process all active messages
 		processed_events = false
 		for {
-			if event, err := wayland.connection_next_event(&state.conn); err == nil {
+			if event, err := wayland.connection_next_event(&state.conn);
+			   err == nil {
 				processed_events = true
 				handle_event(state, event)
 			} else {
@@ -409,7 +472,10 @@ process_wayland_messages :: proc(state: ^Display_State) {
 	}
 }
 
-handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland.Conn_Error {
+handle_event :: proc(
+	state: ^Display_State,
+	message: wayland.Message,
+) -> wayland.Conn_Error {
 	opcode := message.header.opcode
 	switch message.header.target {
 	case 0:
@@ -418,19 +484,28 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 	case state.wl_display:
 		switch opcode {
 		case wayland.WL_DISPLAY_ERROR_EVENT_OPCODE:
-			event := wayland.wl_display_error_parse(&state.conn, message) or_return
+			event := wayland.wl_display_error_parse(
+				&state.conn,
+				message,
+			) or_return
 			handle_wl_display_error(state, event)
 			return nil
 		case wayland.WL_DISPLAY_DELETE_ID_EVENT_OPCODE:
 			// Just parse for logging purposes for now
 			// IDs are cleaned up in "destructor" calls currently, but maybe they should be cleaned up here?
-			_ = wayland.wl_display_delete_id_parse(&state.conn, message) or_return
+			_ = wayland.wl_display_delete_id_parse(
+				&state.conn,
+				message,
+			) or_return
 			return nil
 		}
 	case state.wl_registry:
 		switch opcode {
 		case wayland.WL_REGISTRY_GLOBAL_EVENT_OPCODE:
-			event := wayland.wl_registry_global_parse(&state.conn, message) or_return
+			event := wayland.wl_registry_global_parse(
+				&state.conn,
+				message,
+			) or_return
 			handle_wl_registry_global(state, event)
 			return nil
 		case wayland.WL_REGISTRY_GLOBAL_REMOVE_EVENT_OPCODE:
@@ -441,7 +516,10 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 		case wayland.WL_SEAT_CAPABILITIES_EVENT_OPCODE:
 			handle_seat_capabilities(
 				state,
-				wayland.wl_seat_capabilities_parse(&state.conn, message) or_return,
+				wayland.wl_seat_capabilities_parse(
+					&state.conn,
+					message,
+				) or_return,
 			)
 			return nil
 		case wayland.WL_SEAT_NAME_EVENT_OPCODE:
@@ -454,19 +532,28 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 		case wayland.WL_KEYBOARD_KEYMAP_EVENT_OPCODE:
 			handle_keyboard_keymap(
 				state,
-				wayland.wl_keyboard_keymap_parse(&state.conn, message) or_return,
+				wayland.wl_keyboard_keymap_parse(
+					&state.conn,
+					message,
+				) or_return,
 			)
 			return nil
 		case wayland.WL_KEYBOARD_ENTER_EVENT_OPCODE:
 			handle_keyboard_enter(
 				state,
-				wayland.wl_keyboard_enter_parse(&state.conn, message) or_return,
+				wayland.wl_keyboard_enter_parse(
+					&state.conn,
+					message,
+				) or_return,
 			)
 			return nil
 		case wayland.WL_KEYBOARD_LEAVE_EVENT_OPCODE:
 			handle_keyboard_leave(
 				state,
-				wayland.wl_keyboard_leave_parse(&state.conn, message) or_return,
+				wayland.wl_keyboard_leave_parse(
+					&state.conn,
+					message,
+				) or_return,
 			)
 			return nil
 		case wayland.WL_KEYBOARD_KEY_EVENT_OPCODE:
@@ -478,7 +565,10 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 		case wayland.WL_KEYBOARD_MODIFIERS_EVENT_OPCODE:
 			handle_keyboard_modifiers(
 				state,
-				wayland.wl_keyboard_modifiers_parse(&state.conn, message) or_return,
+				wayland.wl_keyboard_modifiers_parse(
+					&state.conn,
+					message,
+				) or_return,
 			)
 			return nil
 		}
@@ -492,7 +582,10 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 	case state.wl_surface:
 		switch opcode {
 		case wayland.WL_SURFACE_PREFERRED_BUFFER_SCALE_EVENT_OPCODE:
-			_ = wayland.wl_surface_preferred_buffer_scale_parse(&state.conn, message) or_return
+			_ = wayland.wl_surface_preferred_buffer_scale_parse(
+				&state.conn,
+				message,
+			) or_return
 			// TODO: Impl
 			return nil
 		}
@@ -501,7 +594,10 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 		case wayland.XDG_SURFACE_CONFIGURE_EVENT_OPCODE:
 			handle_xdg_surface_configure(
 				state,
-				wayland.xdg_surface_configure_parse(&state.conn, message) or_return,
+				wayland.xdg_surface_configure_parse(
+					&state.conn,
+					message,
+				) or_return,
 			)
 			return nil
 		}
@@ -510,13 +606,19 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 		case wayland.XDG_TOPLEVEL_CLOSE_EVENT_OPCODE:
 			handle_xdg_toplevel_close(
 				state,
-				wayland.xdg_toplevel_close_parse(&state.conn, message) or_return,
+				wayland.xdg_toplevel_close_parse(
+					&state.conn,
+					message,
+				) or_return,
 			)
 			return nil
 		case wayland.XDG_TOPLEVEL_CONFIGURE_EVENT_OPCODE:
 			handle_xdg_toplevel_configure(
 				state,
-				wayland.xdg_toplevel_configure_parse(&state.conn, message) or_return,
+				wayland.xdg_toplevel_configure_parse(
+					&state.conn,
+					message,
+				) or_return,
 			)
 			return nil
 		}
@@ -547,7 +649,10 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 				handle_buffer_release(
 					state,
 					i,
-					wayland.wl_buffer_release_parse(&state.conn, message) or_return,
+					wayland.wl_buffer_release_parse(
+						&state.conn,
+						message,
+					) or_return,
 				)
 				return nil
 			}
@@ -563,7 +668,10 @@ handle_event :: proc(state: ^Display_State, message: wayland.Message) -> wayland
 	return nil
 }
 
-handle_wl_display_error :: proc(state: ^Display_State, event: wayland.Wl_Display_Error_Event) {
+handle_wl_display_error :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Display_Error_Event,
+) {
 	log.errorf(
 		"error from compositor: object_id={} code={} message={}",
 		event.object_id,
@@ -572,7 +680,10 @@ handle_wl_display_error :: proc(state: ^Display_State, event: wayland.Wl_Display
 	)
 }
 
-handle_wl_registry_global :: proc(state: ^Display_State, event: wayland.Wl_Registry_Global_Event) {
+handle_wl_registry_global :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Registry_Global_Event,
+) {
 	state_field: ^wayland.Object_Id
 	switch event.interface {
 	case "wl_compositor":
@@ -599,7 +710,10 @@ handle_wl_registry_global :: proc(state: ^Display_State, event: wayland.Wl_Regis
 	}
 }
 
-handle_xdg_wm_base_ping :: proc(state: ^Display_State, event: wayland.Xdg_Wm_Base_Ping_Event) {
+handle_xdg_wm_base_ping :: proc(
+	state: ^Display_State,
+	event: wayland.Xdg_Wm_Base_Ping_Event,
+) {
 	_ = wayland.xdg_wm_base_pong(&state.conn, state.xdg_wm_base, event.serial)
 }
 
@@ -614,20 +728,27 @@ handle_xdg_toplevel_configure :: proc(
 	state: ^Display_State,
 	event: wayland.Xdg_Toplevel_Configure_Event,
 ) {
-	states := mem.slice_data_cast([]wayland.Xdg_Toplevel_State_Enum, event.states)
+	states := mem.slice_data_cast(
+		[]wayland.Xdg_Toplevel_State_Enum,
+		event.states,
+	)
 	log.debug("xdg_toplevel.configure: states={}", states)
 	// TODO: Actually handle the requests
 }
 
 request_frame_callback :: proc(state: ^Display_State) {
-	if cb, err := wayland.wl_surface_frame(&state.conn, state.wl_surface); err == nil {
+	if cb, err := wayland.wl_surface_frame(&state.conn, state.wl_surface);
+	   err == nil {
 		state.frame_callback = cb
 	} else {
 		log.errorf("frame request failed: {}", err)
 	}
 }
 
-handle_frame_callback :: proc(state: ^Display_State, event: wayland.Wl_Callback_Done_Event) {
+handle_frame_callback :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Callback_Done_Event,
+) {
 	request_frame_callback(state)
 
 	// Use frame timestamps to calculate frame rate, but use local clock for
@@ -659,7 +780,10 @@ handle_buffer_release :: proc(
 	state.buffers[buffer_index].state = .Free
 }
 
-handle_xdg_toplevel_close :: proc(state: ^Display_State, event: wayland.Xdg_Toplevel_Close_Event) {
+handle_xdg_toplevel_close :: proc(
+	state: ^Display_State,
+	event: wayland.Xdg_Toplevel_Close_Event,
+) {
 	state.close_requested = true
 }
 
@@ -672,7 +796,10 @@ handle_seat_capabilities :: proc(
 		return
 	}
 
-	state.wl_keyboard, _ = wayland.wl_seat_get_keyboard(&state.conn, state.wl_seat)
+	state.wl_keyboard, _ = wayland.wl_seat_get_keyboard(
+		&state.conn,
+		state.wl_seat,
+	)
 }
 
 // TODO: Pull these (and others) from linux EVDEV header
@@ -688,7 +815,10 @@ KEY_RIGHT :: 106
 KEY_SPACE :: 57
 KEY_ESC :: 1
 
-handle_keyboard_keymap :: proc(state: ^Display_State, event: wayland.Wl_Keyboard_Keymap_Event) {
+handle_keyboard_keymap :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Keyboard_Keymap_Event,
+) {
 	// Don't care about the keymap for now
 	if event.fd > 0 do posix.close(event.fd)
 }
@@ -720,7 +850,10 @@ scancode_to_key :: proc(code: u32) -> (Key, bool) {
 	}
 }
 
-handle_keyboard_enter :: proc(state: ^Display_State, event: wayland.Wl_Keyboard_Enter_Event) {
+handle_keyboard_enter :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Keyboard_Enter_Event,
+) {
 	scan_codes := mem.slice_data_cast([]u32, event.keys)
 	for code in scan_codes {
 		if k, ok := scancode_to_key(code); ok {
@@ -729,17 +862,26 @@ handle_keyboard_enter :: proc(state: ^Display_State, event: wayland.Wl_Keyboard_
 	}
 }
 
-handle_keyboard_leave :: proc(state: ^Display_State, event: wayland.Wl_Keyboard_Leave_Event) {
+handle_keyboard_leave :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Keyboard_Leave_Event,
+) {
 	// Releasing all keys when un-focusing makes logic in `enter` easiest
 	for &key in state.keyboard_input {
 		button_input_update(&key, pressed = false)
 	}
 }
 
-handle_keyboard_key :: proc(state: ^Display_State, event: wayland.Wl_Keyboard_Key_Event) {
+handle_keyboard_key :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Keyboard_Key_Event,
+) {
 	// TODO: Track event time?
 	if k, ok := scancode_to_key(event.key); ok {
-		button_input_update(&state.keyboard_input[k], pressed = event.state == .Pressed)
+		button_input_update(
+			&state.keyboard_input[k],
+			pressed = event.state == .Pressed,
+		)
 	}
 }
 
@@ -750,7 +892,13 @@ handle_keyboard_modifiers :: proc(
 
 Shm_Error :: posix.Errno
 
-create_shm_file :: proc(size: uint) -> (shm_fd: posix.FD, shm_buf: []u8, err: Shm_Error) {
+create_shm_file :: proc(
+	size: uint,
+) -> (
+	shm_fd: posix.FD,
+	shm_buf: []u8,
+	err: Shm_Error,
+) {
 	name_buf := [255]u8{}
 	name_builder := strings.builder_from_slice(name_buf[:])
 	// TODO: More robust way of making a random name?
@@ -808,10 +956,10 @@ destroy_shm_mapping :: proc(shm_fd: posix.FD, shm_buf: []u8) {
 import "vendor/alsa"
 
 Audio_State :: struct {
-	pcm:         alsa.Pcm,
+	pcm: alsa.Pcm,
 	buffer_size: alsa.Pcm_Uframes,
 	period_size: alsa.Pcm_Uframes,
-	config:      Audio_Output_Config,
+	config: Audio_Output_Config,
 }
 
 Audio_Error :: enum {
@@ -820,7 +968,8 @@ Audio_Error :: enum {
 }
 
 audio_init :: proc(state: ^Audio_State) -> Audio_Error {
-	if err := alsa.pcm_open(&state.pcm, "default", .Playback, .Block); err != 0 {
+	if err := alsa.pcm_open(&state.pcm, "default", .Playback, .Block);
+	   err != 0 {
 		log.error("failed to open audio device:", alsa.strerror(err))
 		return .Failed
 	}
@@ -850,25 +999,40 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 		return .Failed
 	}
 	// Based on pcm_set_params, but with some customizations
-	if err := alsa.pcm_hw_params_set_rate_resample(state.pcm, hw_params, .Enable); err != 0 {
+	if err := alsa.pcm_hw_params_set_rate_resample(
+		state.pcm,
+		hw_params,
+		.Enable,
+	); err != 0 {
 		log.error("audio: failed to set rate resample:", alsa.strerror(err))
 		return .Failed
 	}
-	if err := alsa.pcm_hw_params_set_access(state.pcm, hw_params, .MMAP_INTERLEAVED); err != 0 {
+	if err := alsa.pcm_hw_params_set_access(
+		state.pcm,
+		hw_params,
+		.MMAP_INTERLEAVED,
+	); err != 0 {
 		log.error("audio: failed to set access mode:", alsa.strerror(err))
 		return .Failed
 	}
-	if err := alsa.pcm_hw_params_set_format(state.pcm, hw_params, .S16); err != 0 {
+	if err := alsa.pcm_hw_params_set_format(state.pcm, hw_params, .S16);
+	   err != 0 {
 		log.error("audio: failed to set format:", alsa.strerror(err))
 		return .Failed
 	}
-	if err := alsa.pcm_hw_params_set_channels(state.pcm, hw_params, 2); err != 0 {
+	if err := alsa.pcm_hw_params_set_channels(state.pcm, hw_params, 2);
+	   err != 0 {
 		log.error("audio: failed to set channels:", alsa.strerror(err))
 		return .Failed
 	}
 
 	sample_rate: c.uint = TARGET_SAMPLE_RATE
-	if err := alsa.pcm_hw_params_set_rate_near(state.pcm, hw_params, &sample_rate, nil); err != 0 {
+	if err := alsa.pcm_hw_params_set_rate_near(
+		state.pcm,
+		hw_params,
+		&sample_rate,
+		nil,
+	); err != 0 {
 		log.error("audio: failed to set rate:", alsa.strerror(err))
 		return .Failed
 	}
@@ -877,23 +1041,37 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 	// TODO: Play around with period/buffer time settings
 
 	period_time_us: c.uint = TARGET_FRAME_US / 2
-	if err := alsa.pcm_hw_params_set_period_time_near(state.pcm, hw_params, &period_time_us, nil);
-	   err != 0 {
+	if err := alsa.pcm_hw_params_set_period_time_near(
+		state.pcm,
+		hw_params,
+		&period_time_us,
+		nil,
+	); err != 0 {
 		log.error("audio: failed to set period time:", alsa.strerror(err))
 		return .Failed
 	}
 	buffer_time_us: c.uint = TARGET_FRAME_US * 2
-	if err := alsa.pcm_hw_params_set_buffer_time_near(state.pcm, hw_params, &buffer_time_us, nil);
-	   err != 0 {
+	if err := alsa.pcm_hw_params_set_buffer_time_near(
+		state.pcm,
+		hw_params,
+		&buffer_time_us,
+		nil,
+	); err != 0 {
 		log.error("audio: failed to set buffer time:", alsa.strerror(err))
 		return .Failed
 	}
 
-	if err := alsa.pcm_hw_params_get_buffer_size(hw_params, &state.buffer_size); err != 0 {
+	if err := alsa.pcm_hw_params_get_buffer_size(
+		hw_params,
+		&state.buffer_size,
+	); err != 0 {
 		log.error("audio: failed to get buffer size:", alsa.strerror(err))
 		return .Failed
 	}
-	if err := alsa.pcm_hw_params_get_period_size(hw_params, &state.period_size); err != 0 {
+	if err := alsa.pcm_hw_params_get_period_size(
+		hw_params,
+		&state.period_size,
+	); err != 0 {
 		log.error("audio: failed to get period size:", alsa.strerror(err))
 		return .Failed
 	}
@@ -909,18 +1087,26 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 		return .Failed
 	}
 
-	if err := alsa.pcm_sw_params_set_avail_min(state.pcm, sw_params, state.period_size); err != 0 {
+	if err := alsa.pcm_sw_params_set_avail_min(
+		state.pcm,
+		sw_params,
+		state.period_size,
+	); err != 0 {
 		log.error("audio: failed to set avail min:", alsa.strerror(err))
 		return .Failed
 	}
 	// Disable auto-start
-	if err := alsa.pcm_sw_params_set_start_threshold(state.pcm, sw_params, max(alsa.Pcm_Uframes));
-	   err != 0 {
+	if err := alsa.pcm_sw_params_set_start_threshold(
+		state.pcm,
+		sw_params,
+		max(alsa.Pcm_Uframes),
+	); err != 0 {
 		log.error("audio: failed to set start threshold:", alsa.strerror(err))
 		return .Failed
 	}
 	// Only stop when empty
-	if err := alsa.pcm_sw_params_set_stop_threshold(state.pcm, sw_params, 0); err != 0 {
+	if err := alsa.pcm_sw_params_set_stop_threshold(state.pcm, sw_params, 0);
+	   err != 0 {
 		log.error("audio: failed to set stop threshold:", alsa.strerror(err))
 		return .Failed
 	}
@@ -957,7 +1143,10 @@ get_audio_buffer :: proc(
 	// TODO: Add more generic Audio_Buffer type if first and step have padding
 	// TODO: Just assert?
 	if area.first != 0 {
-		log.errorf("channel offset not byte-aligned: first_bits={}", area.first)
+		log.errorf(
+			"channel offset not byte-aligned: first_bits={}",
+			area.first,
+		)
 		return
 	}
 	if area.step != 8 * size_of(Audio_Frame) {
@@ -984,8 +1173,11 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 			need_start = false
 		case .STATE_XRUN:
 			log.warn("audio overrun")
-			if err := alsa.pcm_recover(audio.pcm, -posix.EPIPE, alsa.PCM_RECOVER_VERBOSE);
-			   err != 0 {
+			if err := alsa.pcm_recover(
+				audio.pcm,
+				-posix.EPIPE,
+				alsa.PCM_RECOVER_VERBOSE,
+			); err != 0 {
 				log.error("failed to recover:", alsa.strerror(err))
 				return .Failed
 			}
@@ -999,7 +1191,11 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 		avail: alsa.Pcm_Sframes
 		delay: alsa.Pcm_Sframes
 		if err := alsa.pcm_avail_delay(audio.pcm, &avail, &delay); err != 0 {
-			if err := alsa.pcm_recover(audio.pcm, err, alsa.PCM_RECOVER_VERBOSE); err != 0 {
+			if err := alsa.pcm_recover(
+				audio.pcm,
+				err,
+				alsa.PCM_RECOVER_VERBOSE,
+			); err != 0 {
 				log.error(
 					"failed to update available space: failed to recover:",
 					alsa.strerror(err),
@@ -1032,12 +1228,18 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 		area: [^]alsa.Pcm_Channel_Area // Multi-pointer for the API
 		offset: alsa.Pcm_Uframes
 		space := alsa.Pcm_Uframes(avail)
-		if err := alsa.pcm_mmap_begin(audio.pcm, &area, &offset, &space); err != 0 {
+		if err := alsa.pcm_mmap_begin(audio.pcm, &area, &offset, &space);
+		   err != 0 {
 			log.error("failed to lock mmap area:", alsa.strerror(err))
 			return .Failed
 		}
 
-		frame_buf, ok := get_audio_buffer(audio.buffer_size, area, offset, space)
+		frame_buf, ok := get_audio_buffer(
+			audio.buffer_size,
+			area,
+			offset,
+			space,
+		)
 		if !ok do return .Failed
 
 		game_render_audio(&state.game, state.audio.config, frame_buf)
@@ -1071,9 +1273,17 @@ audio_get_poll_descriptor_count :: proc(state: ^Audio_State) -> int {
 	return int(alsa.pcm_poll_descriptors_count(state.pcm))
 }
 
-audio_get_poll_descriptors :: proc(state: ^Audio_State, pfds: []posix.pollfd) -> (ok: bool) {
-	if res := alsa.pcm_poll_descriptors(state.pcm, &pfds[0], c.uint(len(pfds)));
-	   res == c.int(len(pfds)) {
+audio_get_poll_descriptors :: proc(
+	state: ^Audio_State,
+	pfds: []posix.pollfd,
+) -> (
+	ok: bool,
+) {
+	if res := alsa.pcm_poll_descriptors(
+		state.pcm,
+		&pfds[0],
+		c.uint(len(pfds)),
+	); res == c.int(len(pfds)) {
 		return true
 	} else if res < 0 {
 		log.error("failed to get poll descriptors:", alsa.strerror(res))

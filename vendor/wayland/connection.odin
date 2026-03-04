@@ -12,12 +12,15 @@ import "core:path/filepath"
 import "core:sys/posix"
 
 ID_Allocator :: struct {
-	free_list:    [dynamic]Object_Id,
+	free_list: [dynamic]Object_Id,
 	// Store "last used" instead of "next unused" so that zero-initialization is valid (for tracking client IDs, at least)
 	last_used_id: Object_Id,
 }
 
-id_allocator_init :: proc(id_alloc: ^ID_Allocator, allocator := context.allocator) {
+id_allocator_init :: proc(
+	id_alloc: ^ID_Allocator,
+	allocator := context.allocator,
+) {
 	// TODO: Is this the proper way to configure an allocator for a dynamic array without allocating it?
 	id_alloc.free_list = make([dynamic]Object_Id, 0, 0, allocator)
 	id_alloc.last_used_id = MIN_CLIENT_ID - 1
@@ -40,7 +43,10 @@ id_allocator_alloc :: proc(id_alloc: ^ID_Allocator) -> (Object_Id, bool) {
 	return id_alloc.last_used_id, true
 }
 
-id_allocator_free :: proc(id_alloc: ^ID_Allocator, id: Object_Id) -> runtime.Allocator_Error {
+id_allocator_free :: proc(
+	id_alloc: ^ID_Allocator,
+	id: Object_Id,
+) -> runtime.Allocator_Error {
 	if id == OBJECT_ID_NIL {
 		return nil
 	} else if id == id_alloc.last_used_id {
@@ -57,8 +63,8 @@ id_allocator_free :: proc(id_alloc: ^ID_Allocator, id: Object_Id) -> runtime.All
 }
 
 Connection :: struct {
-	socket_fd:          posix.FD,
-	id_allocator:       ID_Allocator,
+	socket_fd: posix.FD,
+	id_allocator: ID_Allocator,
 	send_buf, recv_buf: Buffer,
 	send_fds, recv_fds: queue.Queue(posix.FD),
 }
@@ -192,7 +198,10 @@ Connect_Error :: union #shared_nil {
 // TODO: This can probably be smaller if logic is added to expand the buffer as-needed based on messages that are sent/received
 CONN_INIT_BUF_LEN :: 65536
 
-connection_init :: proc(conn: ^Connection, allocator := context.allocator) -> Connect_Error {
+connection_init :: proc(
+	conn: ^Connection,
+	allocator := context.allocator,
+) -> Connect_Error {
 	sockaddr := posix.sockaddr_un {
 		sun_family = .UNIX,
 	}
@@ -222,7 +231,12 @@ connection_init :: proc(conn: ^Connection, allocator := context.allocator) -> Co
 		}
 	}
 
-	if posix.connect(conn.socket_fd, (^posix.sockaddr)(&sockaddr), size_of(sockaddr)) == .FAIL {
+	if posix.connect(
+		   conn.socket_fd,
+		   (^posix.sockaddr)(&sockaddr),
+		   size_of(sockaddr),
+	   ) ==
+	   .FAIL {
 		log.error(
 			"could not connect to Wayland socket:",
 			cstring(&sockaddr.sun_path[0]),
@@ -284,7 +298,7 @@ Flush_Error :: enum {
 send_chunk :: proc(conn: ^Connection, max_len: int) -> Flush_Error {
 	data_iov := posix.iovec {
 		iov_base = &buffer_readable(conn.send_buf)[0],
-		iov_len  = uint(max_len),
+		iov_len = uint(max_len),
 	}
 
 	// Wrap in a struct to ensure alignment
@@ -296,18 +310,18 @@ send_chunk :: proc(conn: ^Connection, max_len: int) -> Flush_Error {
 	cmsg_len := uint(CMSG_LEN(size_of(posix.FD) * fds_to_send))
 
 	msg := posix.msghdr {
-		msg_iov        = &data_iov,
-		msg_iovlen     = 1,
-		msg_control    = &cmsg_buf,
+		msg_iov = &data_iov,
+		msg_iovlen = 1,
+		msg_control = &cmsg_buf,
 		msg_controllen = cmsg_len,
 	}
 
 	cmsg := posix.CMSG_FIRSTHDR(&msg)
 	assert(cmsg != nil)
 	cmsg^ = posix.cmsghdr {
-		cmsg_len   = cmsg_len,
+		cmsg_len = cmsg_len,
 		cmsg_level = posix.SOL_SOCKET,
-		cmsg_type  = posix.SCM_RIGHTS,
+		cmsg_type = posix.SCM_RIGHTS,
 	}
 
 	// Copy the FDs, but keep them in the queue for now in case the send fails
@@ -376,7 +390,13 @@ connection_needs_flush :: proc(conn: ^Connection) -> bool {
 }
 
 // Reserve space for an upcoming write, potentially flushing the write buffer
-connection_prepare_write :: proc(conn: ^Connection, size: u16) -> (buf: []u8, err: Conn_Error) {
+connection_prepare_write :: proc(
+	conn: ^Connection,
+	size: u16,
+) -> (
+	buf: []u8,
+	err: Conn_Error,
+) {
 	size := int(size) // int is more useful, u16 used to limit API
 	if size <= buffer_space(conn.send_buf) do return buffer_writable(conn.send_buf)[:size], nil
 
@@ -407,14 +427,21 @@ Read_Error :: enum {
 MIN_READ :: 512
 
 @(private)
-read_chunk :: proc(conn: ^Connection, read_at_least: int) -> (n: int, err: Read_Error) {
-	if buffer_ensure_space(&conn.recv_buf, max(MIN_READ, read_at_least)) != nil {
+read_chunk :: proc(
+	conn: ^Connection,
+	read_at_least: int,
+) -> (
+	n: int,
+	err: Read_Error,
+) {
+	if buffer_ensure_space(&conn.recv_buf, max(MIN_READ, read_at_least)) !=
+	   nil {
 		return 0, .Failed
 	}
 
 	data_iov := posix.iovec {
 		iov_base = &buffer_writable(conn.recv_buf)[0],
-		iov_len  = uint(buffer_space(conn.recv_buf)),
+		iov_len = uint(buffer_space(conn.recv_buf)),
 	}
 
 	// Wrap in a struct to ensure alignment
@@ -423,9 +450,9 @@ read_chunk :: proc(conn: ^Connection, read_at_least: int) -> (n: int, err: Read_
 	}{}
 
 	msg := posix.msghdr {
-		msg_iov        = &data_iov,
-		msg_iovlen     = 1,
-		msg_control    = &cmsg_buf,
+		msg_iov = &data_iov,
+		msg_iovlen = 1,
+		msg_control = &cmsg_buf,
 		msg_controllen = CMSG_MAX_LEN,
 	}
 
@@ -452,7 +479,8 @@ read_chunk :: proc(conn: ^Connection, read_at_least: int) -> (n: int, err: Read_
 		// Copy the FDs, but keep them in the queue for now in case the send fails
 		cmsg_data_base := posix.CMSG_DATA(cmsg)
 		fd_count :=
-			(cmsg.cmsg_len - uint(uintptr(cmsg_data_base) - uintptr(cmsg))) / size_of(posix.FD)
+			(cmsg.cmsg_len - uint(uintptr(cmsg_data_base) - uintptr(cmsg))) /
+			size_of(posix.FD)
 		for i in 0 ..< fd_count {
 			fd: posix.FD
 			// man page says to use memcpy instead of casting
@@ -465,7 +493,13 @@ read_chunk :: proc(conn: ^Connection, read_at_least: int) -> (n: int, err: Read_
 }
 
 @(private)
-fill_read_buffer :: proc(conn: ^Connection, read_at_least: int) -> (n: int, err: Read_Error) {
+fill_read_buffer :: proc(
+	conn: ^Connection,
+	read_at_least: int,
+) -> (
+	n: int,
+	err: Read_Error,
+) {
 	for n < read_at_least {
 		n += read_chunk(conn, read_at_least - n) or_return
 	}
@@ -473,7 +507,12 @@ fill_read_buffer :: proc(conn: ^Connection, read_at_least: int) -> (n: int, err:
 }
 
 @(private)
-try_parse_buffered_message :: proc(conn: ^Connection) -> (message: Message, bytes_needed: int) {
+try_parse_buffered_message :: proc(
+	conn: ^Connection,
+) -> (
+	message: Message,
+	bytes_needed: int,
+) {
 	buf := buffer_readable(conn.recv_buf)
 	if bytes_needed = message_header_size - len(buf); bytes_needed > 0 {
 		return
@@ -500,7 +539,12 @@ try_parse_buffered_message :: proc(conn: ^Connection) -> (message: Message, byte
 	return
 }
 
-connection_next_event :: proc(conn: ^Connection) -> (message: Message, err: Read_Error) {
+connection_next_event :: proc(
+	conn: ^Connection,
+) -> (
+	message: Message,
+	err: Read_Error,
+) {
 	// May need to run up to 3 times since it may take some data to determine the next message size/
 	// For example:
 	// 1)

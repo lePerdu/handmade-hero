@@ -7,14 +7,14 @@ import "core:mem"
 // Similar to bytes.Buffer, but supports lower-level operations, such as
 // getting slices to read from / write into, as opposed to relying on io.Stream
 Buffer :: struct {
-	data:      []u8,
+	data: []u8,
 	// Storing allocator is essentially the same as using a dynamic array, but I
 	// often want to get slices that aren't in the "active" region, so it's easier
 	// to just store a slice referencing the full capacity.
 	allocator: runtime.Allocator,
 	// Start and end of the active region
-	start:     int,
-	end:       int,
+	start: int,
+	end: int,
 }
 
 @(private)
@@ -81,7 +81,10 @@ _buffer_copy_back :: proc(buffer: ^Buffer) {
 	buffer.end = init_len
 }
 
-buffer_ensure_space :: proc(buffer: ^Buffer, space: int) -> runtime.Allocator_Error {
+buffer_ensure_space :: proc(
+	buffer: ^Buffer,
+	space: int,
+) -> runtime.Allocator_Error {
 	// TODO: Include this in buffer_readable and buffer_writable?
 	if buffer.start >= buffer.end {
 		buffer.start = 0

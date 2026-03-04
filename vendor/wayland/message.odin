@@ -21,11 +21,11 @@ message_header_size :: 8
 Event_Header :: struct {
 	target: Object_Id,
 	opcode: Event_Opcode,
-	size:   u16,
+	size: u16,
 }
 
 Message :: struct {
-	header:  Event_Header,
+	header: Event_Header,
 	payload: []u8,
 }
 
@@ -42,7 +42,11 @@ Parse_Error :: enum {
 	Invalid_Enum,
 }
 
-message_parse_header :: proc(buf: [message_header_size]u8) -> (header: Event_Header) {
+message_parse_header :: proc(
+	buf: [message_header_size]u8,
+) -> (
+	header: Event_Header,
+) {
 	buf := buf
 	mem.copy(&header.target, &buf[0], size_of(header.target))
 	mem.copy(&header.opcode, &buf[4], size_of(header.opcode))
@@ -51,7 +55,10 @@ message_parse_header :: proc(buf: [message_header_size]u8) -> (header: Event_Hea
 }
 
 @(private)
-_reader_check_len :: #force_inline proc(reader: ^Msg_Reader, size: int) -> Parse_Error {
+_reader_check_len :: #force_inline proc(
+	reader: ^Msg_Reader,
+	size: int,
+) -> Parse_Error {
 	if reader.off + size <= len(reader.buf) do return nil
 	return .Message_Too_Short
 }
@@ -75,7 +82,12 @@ message_read_i32 :: proc(reader: ^Msg_Reader) -> (n: i32, err: Parse_Error) {
 	return
 }
 
-message_read_fixed :: proc(reader: ^Msg_Reader) -> (n: Fixed, err: Parse_Error) {
+message_read_fixed :: proc(
+	reader: ^Msg_Reader,
+) -> (
+	n: Fixed,
+	err: Parse_Error,
+) {
 	n = Fixed{message_read_u32(reader) or_return}
 	return
 }
@@ -119,7 +131,12 @@ message_read_enum :: proc(
 }
 
 // The returned array references the buffer in `reader`
-message_read_array :: proc(reader: ^Msg_Reader) -> (arr: []u8, err: Parse_Error) {
+message_read_array :: proc(
+	reader: ^Msg_Reader,
+) -> (
+	arr: []u8,
+	err: Parse_Error,
+) {
 	arr_len: u32
 	arr_len = message_read_u32(reader) or_return
 
@@ -131,7 +148,12 @@ message_read_array :: proc(reader: ^Msg_Reader) -> (arr: []u8, err: Parse_Error)
 }
 
 // The returned string references the buffer in `reader`
-message_read_string :: proc(reader: ^Msg_Reader) -> (str: string, err: Parse_Error) {
+message_read_string :: proc(
+	reader: ^Msg_Reader,
+) -> (
+	str: string,
+	err: Parse_Error,
+) {
 	arr: []u8
 	arr = message_read_array(reader) or_return
 	// Leave off null byte
@@ -152,7 +174,12 @@ message_writer_assert_full :: proc(writer: Msg_Writer) {
 	assert(writer.off == len(writer.buf))
 }
 
-message_write_header :: proc(writer: ^Msg_Writer, target: Object_Id, opcode: Opcode, size: u16) {
+message_write_header :: proc(
+	writer: ^Msg_Writer,
+	target: Object_Id,
+	opcode: Opcode,
+	size: u16,
+) {
 	_writer_assert_space(writer, message_header_size)
 	target := target
 	opcode := opcode

@@ -59,17 +59,17 @@ keyboard_input_reset :: proc(input: ^Keyboard_Input) {
 }
 
 Frame_Buffer :: struct {
-	base:   rawptr,
-	width:  u32,
+	base: rawptr,
+	width: u32,
 	height: u32,
 	stride: u32,
 }
 
 Game_State :: struct {
 	x_offset, y_offset: f32,
-	play_sound:         bool,
-	audio_vol:          f32,
-	audio_phase:        f32,
+	play_sound: bool,
+	audio_vol: f32,
+	audio_phase: f32,
 }
 
 game_update :: proc(state: ^Game_State, input: Game_Input, dt_ns: i64) {
@@ -101,7 +101,10 @@ make_pixel :: proc(r, g, b: u8) -> Pixel {
 
 frame_buffer_row :: proc(fb: Frame_Buffer, y: u32) -> []Pixel {
 	assert(y < fb.height)
-	return mem.slice_ptr((^Pixel)(uintptr(fb.base) + uintptr(y * fb.stride)), int(fb.width))
+	return mem.slice_ptr(
+		(^Pixel)(uintptr(fb.base) + uintptr(y * fb.stride)),
+		int(fb.width),
+	)
 }
 
 render_gradient :: proc(fb: Frame_Buffer, x_offset, y_offset: int) {
@@ -109,7 +112,11 @@ render_gradient :: proc(fb: Frame_Buffer, x_offset, y_offset: int) {
 		row := frame_buffer_row(fb, y)
 		for x in 0 ..< fb.width {
 			// TODO: Is casting to u8 the "proper" way to wrap?
-			row[x] = make_pixel(0, u8(int(y) + y_offset), u8(int(x) + x_offset))
+			row[x] = make_pixel(
+				0,
+				u8(int(y) + y_offset),
+				u8(int(x) + x_offset),
+			)
 		}
 	}
 }
