@@ -9,6 +9,7 @@ import "core:math/rand"
 import "core:mem"
 import os "core:os/os2"
 import "core:path/filepath"
+import "core:path/slashpath"
 import "core:strings"
 import "core:sys/posix"
 import "core:time"
@@ -19,6 +20,8 @@ State :: struct {
 	display: Display_State,
 	audio: Audio_State,
 	game_memory: game_api.Memory,
+	dynlib_path: string,
+	dynlib_load_mod_time: time.Time,
 	game_symbols: game_api.Symbol_Table,
 }
 
@@ -34,8 +37,15 @@ main :: proc() {
 		log.error("failed to allocate game memory:", err)
 		os.exit(1)
 	}
+
 	// Start with dummy symbols
 	state.game_symbols = game_api.dummy_symbol_table
+	if path, err := get_dynlib_path(); err == nil {
+		state.dynlib_path = path
+	} else {
+		log.error("failed to get dynlib path:", err)
+		os.exit(1)
+	}
 	reload_game_symbols(&state)
 
 	if !display_init(&state.display) do os.exit(1)
@@ -47,34 +57,43 @@ main :: proc() {
 
 MIN_UPDATE_PERIOD_NS :: 1_000_000_000 / 30
 
-// TODO: Resolve the path from the executable location instead of hard-coding
-// the build path
-GAME_DYNLIB_PATH :: "./build/game.so"
+GAME_DYNLIB_PATH :: "game.so"
 
-last_dynlib_mod_time: time.Time
+get_dynlib_path :: proc() -> (path: string, err: os.Error) {
+	exec_dir := os.get_executable_directory(context.allocator) or_return
+	return filepath.join({exec_dir, GAME_DYNLIB_PATH})
+}
 
 reload_game_symbols :: proc(state: ^State) {
-	mod_time, err := os.modification_time_by_path(GAME_DYNLIB_PATH)
+	mod_time, err := os.modification_time_by_path(state.dynlib_path)
 	if err == nil {
-		if time.diff(last_dynlib_mod_time, mod_time) == 0 {
+		if time.diff(state.dynlib_load_mod_time, mod_time) == 0 {
 			// Not modified
 			return
 		}
 	} else {
-		log.error("failed to check dynamic library timestamp:", err)
+		log.errorf(
+			"failed to check dynamic library timestamp: {}: {}",
+			state.dynlib_path,
+			err,
+		)
 		return
 	}
 
 	if count, ok := dynlib.initialize_symbols(
 		&state.game_symbols,
-		GAME_DYNLIB_PATH,
+		state.dynlib_path,
 		"handmade_game_",
 	); ok {
-		log.infof("reloaded dynamic library")
+		log.infof("reloaded dynamic library: {}", state.dynlib_path)
 		// Only update the timestamp on successful load
-		last_dynlib_mod_time = mod_time
+		state.dynlib_load_mod_time = mod_time
 	} else {
-		log.error("failed to load dynamic library:", dynlib.last_error())
+		log.errorf(
+			"failed to load dynamic library: {}: {}",
+			state.dynlib_path,
+			dynlib.last_error(),
+		)
 		state.game_symbols = game_api.dummy_symbol_table
 	}
 }
