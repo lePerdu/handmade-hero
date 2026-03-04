@@ -14,6 +14,7 @@ State :: struct {
 	game_context: runtime.Context,
 }
 
+@(export)
 handmade_game_init :: proc "c" (memory: api.Memory, memory_len: int) {
 	// TODO: Return error code instead
 	assert_contextless(memory_len >= size_of(State))
@@ -26,6 +27,7 @@ handmade_game_init :: proc "c" (memory: api.Memory, memory_len: int) {
 	state.game_context.temp_allocator = runtime.nil_allocator()
 }
 
+@(export)
 handmade_game_update :: proc "c" (
 	memory: api.Memory,
 	input: ^api.Input,
@@ -50,6 +52,7 @@ handmade_game_update :: proc "c" (
 	state.play_sound = input.keyboard[.Space].end_pressed
 }
 
+@(export)
 handmade_game_render :: proc "c" (memory: api.Memory, fb: ^api.Frame_Buffer) {
 	state := (^State)(memory)
 	context = state.game_context
@@ -87,6 +90,7 @@ render_gradient :: proc(fb: api.Frame_Buffer, x_offset, y_offset: int) {
 VOLUME :: 0.2
 ATTACK_MS :: 50.0
 
+@(export)
 handmade_game_render_audio :: proc "c" (
 	memory: api.Memory,
 	timings: ^api.Audio_Timings,
@@ -101,7 +105,8 @@ handmade_game_render_audio :: proc "c" (
 		buffer[0:buffer_len],
 		freq = 420.0,
 		amp = &state.audio_vol,
-		amp_target = state.play_sound ? VOLUME : 0.0,
+		// amp_target = state.play_sound ? VOLUME : 0.0,
+		amp_target = VOLUME,
 		phase = &state.audio_phase,
 	)
 }

@@ -27,6 +27,23 @@ Symbol_Table :: struct {
 	render_audio: Render_Audio_Proc,
 }
 
+dummy_symbol_table := Symbol_Table {
+	init = dummy_init,
+	update = dummy_update,
+	render = dummy_render,
+	render_audio = dummy_render_audio,
+}
+
+dummy_init :: proc "c" (memory: Memory, memory_len: int) {}
+dummy_update :: proc "c" (memory: Memory, input: ^Input, dt_ns: i64) {}
+dummy_render :: proc "c" (memory: Memory, fb: ^Frame_Buffer) {}
+dummy_render_audio :: proc "c" (
+	memory: Memory,
+	timings: ^Audio_Timings,
+	buffer: [^]Audio_Frame,
+	buffer_len: int,
+) {}
+
 Input :: struct {
 	keyboard: Keyboard_Input,
 }

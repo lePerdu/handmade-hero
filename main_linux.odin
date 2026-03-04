@@ -3,6 +3,7 @@ package main
 import "base:intrinsics"
 import "base:runtime"
 import "core:c"
+import "core:dynlib"
 import "core:log"
 import "core:math/rand"
 import "core:mem"
@@ -11,7 +12,6 @@ import "core:path/filepath"
 import "core:strings"
 import "core:sys/posix"
 
-import "game"
 import game_api "game/api"
 
 State :: struct {
@@ -33,12 +33,9 @@ main :: proc() {
 		log.error("failed to allocate game memory:", err)
 		os.exit(1)
 	}
-	state.game_symbols = {
-		init = game.handmade_game_init,
-		update = game.handmade_game_update,
-		render = game.handmade_game_render,
-		render_audio = game.handmade_game_render_audio,
-	}
+	// Start with dummy symbols
+	state.game_symbols = game_api.dummy_symbol_table
+	load_game_symbols(&state)
 
 	if !display_init(&state.display) do os.exit(1)
 
@@ -48,6 +45,19 @@ main :: proc() {
 }
 
 MIN_UPDATE_PERIOD_NS :: 1_000_000_000 / 30
+
+load_game_symbols :: proc(state: ^State) {
+	if count, ok := dynlib.initialize_symbols(
+		&state.game_symbols,
+		"game.so",
+		"handmade_game_",
+	); ok {
+		log.infof("reloaded dynamic library")
+	} else {
+		log.error("failed to load dynamic library:", dynlib.last_error())
+		state.game_symbols = game_api.dummy_symbol_table
+	}
+}
 
 game_loop :: proc(state: ^State) {
 	poll_fds: []posix.pollfd
@@ -94,7 +104,15 @@ game_loop :: proc(state: ^State) {
 		return
 	}
 
+	RELOAD_PERIOD_NS :: 1_000_000_000
+	last_reload_ns: i64 = get_perf_counter_wall_ns()
+
 	for !state.display.close_requested {
+		if get_perf_counter_wall_ns() > last_reload_ns + RELOAD_PERIOD_NS {
+			load_game_symbols(state)
+			last_reload_ns = get_perf_counter_wall_ns()
+		}
+
 		counter_start_wall_ns := get_perf_counter_wall_ns()
 		counter_start_cpu_ns := get_perf_counter_cpu_ns()
 		counter_start_cpu_cycles := get_perf_counter_cpu_cycles()
