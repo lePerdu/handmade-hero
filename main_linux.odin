@@ -1,6 +1,7 @@
 package main
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:c"
 import "core:log"
 import "core:math/rand"
@@ -10,16 +11,34 @@ import "core:path/filepath"
 import "core:strings"
 import "core:sys/posix"
 
+import "game"
+import game_api "game/api"
+
 State :: struct {
 	display: Display_State,
 	audio: Audio_State,
-	game: Game_State,
+	game_memory: game_api.Memory,
+	game_symbols: game_api.Symbol_Table,
 }
+
+GAME_MEMORY_SIZE :: 1 << 20
 
 main :: proc() {
 	context.logger = log.create_console_logger(lowest = .Debug)
 
 	state: State
+	if mem_block, err := runtime.mem_alloc(GAME_MEMORY_SIZE); err == nil {
+		state.game_memory = game_api.Memory(raw_data(mem_block))
+	} else {
+		log.error("failed to allocate game memory:", err)
+		os.exit(1)
+	}
+	state.game_symbols = {
+		init = game.handmade_game_init,
+		update = game.handmade_game_update,
+		render = game.handmade_game_render,
+		render_audio = game.handmade_game_render_audio,
+	}
 
 	if !display_init(&state.display) do os.exit(1)
 
@@ -64,7 +83,7 @@ game_loop :: proc(state: ^State) {
 	last_render_time_ns: i64
 
 	if fb, ok := display_get_back_buffer(&state.display); ok {
-		game_render(&state.game, fb)
+		state.game_symbols.render(state.game_memory, &fb)
 		last_render_time_ns = get_perf_counter_wall_ns()
 		display_submit_first_frame(&state.display)
 	} else {
@@ -105,7 +124,10 @@ game_loop :: proc(state: ^State) {
 		}
 
 		display_handle_poll(&state.display, display_poll_fd) or_break
-		if button_input_press_count(state.display.keyboard_input[.Esc]) > 0 {
+		if game_api.button_input_press_count(
+			   state.display.keyboard_input[.Esc],
+		   ) >
+		   0 {
 			break
 		}
 
@@ -113,9 +135,13 @@ game_loop :: proc(state: ^State) {
 		// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
 		if now := get_perf_counter_wall_ns(); now >= next_update_time_ns {
 			// TODO: Don't create the Game_Input object every time
-			input := Game_Input{state.display.keyboard_input}
-			game_update(&state.game, input, now - last_update_time_ns)
-			keyboard_input_reset(&state.display.keyboard_input)
+			input := game_api.Input{state.display.keyboard_input}
+			state.game_symbols.update(
+				state.game_memory,
+				&input,
+				now - last_update_time_ns,
+			)
+			game_api.keyboard_input_reset(&state.display.keyboard_input)
 			last_update_time_ns = now
 		}
 
@@ -123,7 +149,7 @@ game_loop :: proc(state: ^State) {
 		// TODO: Render at a fixed rate even if some frames won't be presented?
 		if state.display.last_frame_time_ns > last_render_time_ns {
 			if fb, ok := display_get_back_buffer(&state.display); ok {
-				game_render(&state.game, fb)
+				state.game_symbols.render(state.game_memory, &fb)
 				last_render_time_ns = get_perf_counter_wall_ns()
 				// TODO: Fix/remove time for first frame, since it is incorrect
 				log.debugf(
@@ -178,7 +204,7 @@ Buffer_State :: enum {
 Display_Buffer :: struct {
 	wl_buffer: wayland.Wl_Buffer,
 	state: Buffer_State,
-	frame_buffer: Frame_Buffer,
+	frame_buffer: game_api.Frame_Buffer,
 }
 
 Display_State :: struct {
@@ -213,7 +239,7 @@ Display_State :: struct {
 
 	// Input
 	wl_keyboard: wayland.Wl_Keyboard,
-	keyboard_input: Keyboard_Input,
+	keyboard_input: game_api.Keyboard_Input,
 
 	// Frame state
 	frame_callback: wayland.Wl_Callback,
@@ -372,7 +398,7 @@ display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
 display_get_back_buffer :: proc(
 	state: ^Display_State,
 ) -> (
-	fb: Frame_Buffer,
+	fb: game_api.Frame_Buffer,
 	ok: bool,
 ) {
 	b := &state.buffers[state.back_buffer_index]
@@ -823,7 +849,7 @@ handle_keyboard_keymap :: proc(
 	if event.fd > 0 do posix.close(event.fd)
 }
 
-scancode_to_key :: proc(code: u32) -> (Key, bool) {
+scancode_to_key :: proc(code: u32) -> (game_api.Key, bool) {
 	switch code {
 	case KEY_W:
 		return .W, true
@@ -857,7 +883,10 @@ handle_keyboard_enter :: proc(
 	scan_codes := mem.slice_data_cast([]u32, event.keys)
 	for code in scan_codes {
 		if k, ok := scancode_to_key(code); ok {
-			button_input_update(&state.keyboard_input[k], pressed = true)
+			game_api.button_input_update(
+				&state.keyboard_input[k],
+				pressed = true,
+			)
 		}
 	}
 }
@@ -868,7 +897,7 @@ handle_keyboard_leave :: proc(
 ) {
 	// Releasing all keys when un-focusing makes logic in `enter` easiest
 	for &key in state.keyboard_input {
-		button_input_update(&key, pressed = false)
+		game_api.button_input_update(&key, pressed = false)
 	}
 }
 
@@ -878,7 +907,7 @@ handle_keyboard_key :: proc(
 ) {
 	// TODO: Track event time?
 	if k, ok := scancode_to_key(event.key); ok {
-		button_input_update(
+		game_api.button_input_update(
 			&state.keyboard_input[k],
 			pressed = event.state == .Pressed,
 		)
@@ -1137,7 +1166,7 @@ get_audio_buffer :: proc(
 	offset: alsa.Pcm_Uframes,
 	space: alsa.Pcm_Uframes,
 ) -> (
-	buf: []Audio_Frame,
+	buf: []game_api.Audio_Frame,
 	ok: bool,
 ) {
 	// TODO: Add more generic Audio_Buffer type if first and step have padding
@@ -1149,7 +1178,7 @@ get_audio_buffer :: proc(
 		)
 		return
 	}
-	if area.step != 8 * size_of(Audio_Frame) {
+	if area.step != 8 * size_of(game_api.Audio_Frame) {
 		log.errorf("channel offset not Frame: step_bits={}", area.step)
 		return
 	}
@@ -1157,7 +1186,10 @@ get_audio_buffer :: proc(
 	// Make sure the API doesn't expect me to handle wrap-around
 	assert(offset + space <= buffer_size)
 
-	full_buffer := mem.slice_ptr((^Audio_Frame)(area.addr), int(buffer_size))
+	full_buffer := mem.slice_ptr(
+		(^game_api.Audio_Frame)(area.addr),
+		int(buffer_size),
+	)
 	return full_buffer[offset:][:space], true
 }
 
@@ -1244,11 +1276,16 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 		)
 		if !ok do return .Failed
 
-		timings := Audio_Timings {
+		timings := game_api.Audio_Timings {
 			write_timestamp_ns = write_timestamp_ns,
 			sample_rate = audio.sample_rate,
 		}
-		game_render_audio(&state.game, timings, frame_buf)
+		state.game_symbols.render_audio(
+			state.game_memory,
+			&timings,
+			raw_data(frame_buf),
+			len(frame_buf),
+		)
 
 		if err := alsa.pcm_mmap_commit(audio.pcm, offset, space); err < 0 {
 			log.error("failed to commit mmap area:", alsa.strerror(i32(err)))

@@ -1,78 +1,39 @@
-package main
+package game
 
+import "base:runtime"
 import "core:math"
 import "core:mem"
 
-// Enum of the keys we care about
-Key :: enum {
-	W,
-	A,
-	S,
-	D,
-	UP,
-	Left,
-	Right,
-	Down,
-	Space,
-	Esc,
-}
+import "api"
 
-Button_Input :: struct {
-	end_pressed: bool,
-	transitions: u32,
-}
-
-Keyboard_Input :: [Key]Button_Input
-
-Game_Input :: struct {
-	keyboard: Keyboard_Input,
-}
-
-button_input_press_count :: proc(button: Button_Input) -> u32 {
-	if button.end_pressed {
-		// 0->0
-		// 1->1
-		// 2->1
-		// 3->2
-		return (button.transitions + 1) / 2
-	} else {
-		// 0->0
-		// 1->0
-		// 2->1
-		// 3->1
-		return button.transitions / 2
-	}
-}
-
-button_input_update :: proc(button: ^Button_Input, pressed: bool) {
-	if pressed != button.end_pressed {
-		button.end_pressed = pressed
-		button.transitions += 1
-	}
-}
-
-// Reset input data after a state change
-keyboard_input_reset :: proc(input: ^Keyboard_Input) {
-	for &key in input {
-		key.transitions = 0
-	}
-}
-
-Frame_Buffer :: struct {
-	base: rawptr,
-	width: u32,
-	height: u32,
-	stride: u32,
-}
-
-Game_State :: struct {
+State :: struct {
 	x_offset, y_offset: f32,
 	play_sound: bool,
 	audio_vol: f32,
 	audio_phase: f32,
+	game_context: runtime.Context,
 }
 
-game_update :: proc(state: ^Game_State, input: Game_Input, dt_ns: i64) {
+handmade_game_init :: proc "c" (memory: api.Memory, memory_len: int) {
+	// TODO: Return error code instead
+	assert_contextless(memory_len >= size_of(State))
+	state := (^State)(memory)
+	state^ = {
+		game_context = runtime.default_context(),
+	}
+	// TODO: Configure these to allocate from passed in memory block
+	state.game_context.allocator = runtime.nil_allocator()
+	state.game_context.temp_allocator = runtime.nil_allocator()
+}
+
+handmade_game_update :: proc "c" (
+	memory: api.Memory,
+	input: ^api.Input,
+	dt_ns: i64,
+) {
+	state := (^State)(memory)
+	context = state.game_context
+
 	// rate=24p/s
 	rate: f32 : 24.0
 	x_rate: f32 = 0.0
@@ -89,8 +50,10 @@ game_update :: proc(state: ^Game_State, input: Game_Input, dt_ns: i64) {
 	state.play_sound = input.keyboard[.Space].end_pressed
 }
 
-game_render :: proc(state: ^Game_State, fb: Frame_Buffer) {
-	render_gradient(fb, int(state.x_offset), int(state.y_offset))
+handmade_game_render :: proc "c" (memory: api.Memory, fb: ^api.Frame_Buffer) {
+	state := (^State)(memory)
+	context = state.game_context
+	render_gradient(fb^, int(state.x_offset), int(state.y_offset))
 }
 
 Pixel :: distinct u32
@@ -99,7 +62,7 @@ make_pixel :: proc(r, g, b: u8) -> Pixel {
 	return Pixel(u32(r) << 16 | u32(g) << 8 | u32(b))
 }
 
-frame_buffer_row :: proc(fb: Frame_Buffer, y: u32) -> []Pixel {
+frame_buffer_row :: proc(fb: api.Frame_Buffer, y: u32) -> []Pixel {
 	assert(y < fb.height)
 	return mem.slice_ptr(
 		(^Pixel)(uintptr(fb.base) + uintptr(y * fb.stride)),
@@ -107,7 +70,7 @@ frame_buffer_row :: proc(fb: Frame_Buffer, y: u32) -> []Pixel {
 	)
 }
 
-render_gradient :: proc(fb: Frame_Buffer, x_offset, y_offset: int) {
+render_gradient :: proc(fb: api.Frame_Buffer, x_offset, y_offset: int) {
 	for y in 0 ..< fb.height {
 		row := frame_buffer_row(fb, y)
 		for x in 0 ..< fb.width {
@@ -121,29 +84,21 @@ render_gradient :: proc(fb: Frame_Buffer, x_offset, y_offset: int) {
 	}
 }
 
-Audio_Timings :: struct {
-	// Approximate timestamp at which the next written samples will be audible
-	write_timestamp_ns: i64,
-	// Samples/sec
-	sample_rate: uint,
-}
-
-Audio_Frame :: struct #packed {
-	l: i16,
-	r: i16,
-}
-
 VOLUME :: 0.2
 ATTACK_MS :: 50.0
 
-game_render_audio :: proc(
-	state: ^Game_State,
-	timings: Audio_Timings,
-	buffer: []Audio_Frame,
+handmade_game_render_audio :: proc "c" (
+	memory: api.Memory,
+	timings: ^api.Audio_Timings,
+	buffer: [^]api.Audio_Frame,
+	buffer_len: int,
 ) {
+	state := (^State)(memory)
+	context = state.game_context
+
 	generate_sine(
-		timings,
-		buffer,
+		timings^,
+		buffer[0:buffer_len],
 		freq = 420.0,
 		amp = &state.audio_vol,
 		amp_target = state.play_sound ? VOLUME : 0.0,
@@ -152,8 +107,8 @@ game_render_audio :: proc(
 }
 
 generate_sine :: proc(
-	timings: Audio_Timings,
-	frame_buf: []Audio_Frame,
+	timings: api.Audio_Timings,
+	frame_buf: []api.Audio_Frame,
 	freq: f32,
 	amp: ^f32,
 	amp_target: f32,
