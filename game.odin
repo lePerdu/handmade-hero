@@ -121,7 +121,9 @@ render_gradient :: proc(fb: Frame_Buffer, x_offset, y_offset: int) {
 	}
 }
 
-Audio_Output_Config :: struct {
+Audio_Timings :: struct {
+	// Approximate timestamp at which the next written samples will be audible
+	write_timestamp_ns: i64,
 	// Samples/sec
 	sample_rate: uint,
 }
@@ -132,15 +134,15 @@ Audio_Frame :: struct #packed {
 }
 
 VOLUME :: 0.2
-ATTACK_MS :: 500.0
+ATTACK_MS :: 50.0
 
 game_render_audio :: proc(
 	state: ^Game_State,
-	output_config: Audio_Output_Config,
+	timings: Audio_Timings,
 	buffer: []Audio_Frame,
 ) {
 	generate_sine(
-		output_config,
+		timings,
 		buffer,
 		freq = 420.0,
 		amp = &state.audio_vol,
@@ -150,20 +152,22 @@ game_render_audio :: proc(
 }
 
 generate_sine :: proc(
-	output_config: Audio_Output_Config,
+	timings: Audio_Timings,
 	frame_buf: []Audio_Frame,
 	freq: f32,
 	amp: ^f32,
 	amp_target: f32,
 	phase: ^f32,
 ) {
-	dt := math.TAU / f32(output_config.sample_rate) * freq
-	// amplitude increment for each sample in order to go from 0->VOLUME in ATTACK_MS
-	amp_inc := VOLUME / (ATTACK_MS / 1000.0) / f32(output_config.sample_rate)
+	dt := math.TAU / f32(timings.sample_rate) * freq
+	// amplitude increment for each sample in order to go from 0->VOLUME in
+	// ATTACK_MS
+	amp_inc := VOLUME / (ATTACK_MS / 1000.0) / f32(timings.sample_rate)
 
+	// TODO: Does not modifying the pointers in the loop actually matter?
 	t: f32 = phase^
 	cur_amp: f32 = amp^
-	for _, index in frame_buf {
+	for &frame, index in frame_buf {
 		if cur_amp <= amp_target {
 			cur_amp = min(cur_amp + amp_inc, amp_target)
 		} else {
@@ -171,7 +175,7 @@ generate_sine :: proc(
 		}
 		sample_amp := f32(max(i16)) * cur_amp
 		sample := sample_amp * math.sin(t)
-		frame_buf[index] = {i16(sample), i16(sample)}
+		frame = {i16(sample), i16(sample)}
 		t += dt
 		if t > math.TAU do t -= math.TAU
 	}

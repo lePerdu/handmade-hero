@@ -959,7 +959,7 @@ Audio_State :: struct {
 	pcm: alsa.Pcm,
 	buffer_size: alsa.Pcm_Uframes,
 	period_size: alsa.Pcm_Uframes,
-	config: Audio_Output_Config,
+	sample_rate: uint,
 }
 
 Audio_Error :: enum {
@@ -1036,7 +1036,7 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 		log.error("audio: failed to set rate:", alsa.strerror(err))
 		return .Failed
 	}
-	state.config.sample_rate = uint(sample_rate)
+	state.sample_rate = uint(sample_rate)
 
 	// TODO: Play around with period/buffer time settings
 
@@ -1204,6 +1204,8 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 			}
 			continue
 		}
+		delay_ns := i64(delay) * 1_000_000_000 / i64(audio.sample_rate)
+		write_timestamp_ns := get_perf_counter_wall_ns() + delay_ns
 
 		// Supposedly faster version that doesn't return delay
 		// avail := alsa.pcm_avail_update(audio.pcm)
@@ -1242,7 +1244,11 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 		)
 		if !ok do return .Failed
 
-		game_render_audio(&state.game, state.audio.config, frame_buf)
+		timings := Audio_Timings {
+			write_timestamp_ns = write_timestamp_ns,
+			sample_rate = audio.sample_rate,
+		}
+		game_render_audio(&state.game, timings, frame_buf)
 
 		if err := alsa.pcm_mmap_commit(audio.pcm, offset, space); err < 0 {
 			log.error("failed to commit mmap area:", alsa.strerror(i32(err)))
