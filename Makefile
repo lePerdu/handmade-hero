@@ -11,7 +11,11 @@ game: reload | $(BUILD)
 	odin build . -out:$(EXEC) -debug
 
 reload: | $(BUILD)
-	odin build game -out:$(DYNLIB) -build-mode:dynamic -debug
+	# Build into a temporary file first, then move to the final location so that
+	# the final file is never incomplete. Imporant since the file is watched
+	# and dynamically reloaded
+	odin build game -out:$(DYNLIB).tmp -build-mode:dynamic -debug
+	mv $(DYNLIB).tmp $(DYNLIB)
 
 wayland-scanner: | $(BUILD)
 	odin build vendor/wayland/scanner -out:$(WAYLAND_SCANNER)

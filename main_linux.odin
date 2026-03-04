@@ -7,10 +7,11 @@ import "core:dynlib"
 import "core:log"
 import "core:math/rand"
 import "core:mem"
-import "core:os"
+import os "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
 import "core:sys/posix"
+import "core:time"
 
 import game_api "game/api"
 
@@ -24,7 +25,7 @@ State :: struct {
 GAME_MEMORY_SIZE :: 1 << 20
 
 main :: proc() {
-	context.logger = log.create_console_logger(lowest = .Debug)
+	context.logger = log.create_console_logger(lowest = .Info)
 
 	state: State
 	if mem_block, err := runtime.mem_alloc(GAME_MEMORY_SIZE); err == nil {
@@ -35,7 +36,7 @@ main :: proc() {
 	}
 	// Start with dummy symbols
 	state.game_symbols = game_api.dummy_symbol_table
-	load_game_symbols(&state)
+	reload_game_symbols(&state)
 
 	if !display_init(&state.display) do os.exit(1)
 
@@ -46,13 +47,32 @@ main :: proc() {
 
 MIN_UPDATE_PERIOD_NS :: 1_000_000_000 / 30
 
-load_game_symbols :: proc(state: ^State) {
+// TODO: Resolve the path from the executable location instead of hard-coding
+// the build path
+GAME_DYNLIB_PATH :: "./build/game.so"
+
+last_dynlib_mod_time: time.Time
+
+reload_game_symbols :: proc(state: ^State) {
+	mod_time, err := os.modification_time_by_path(GAME_DYNLIB_PATH)
+	if err == nil {
+		if time.diff(last_dynlib_mod_time, mod_time) == 0 {
+			// Not modified
+			return
+		}
+	} else {
+		log.error("failed to check dynamic library timestamp:", err)
+		return
+	}
+
 	if count, ok := dynlib.initialize_symbols(
 		&state.game_symbols,
-		"game.so",
+		GAME_DYNLIB_PATH,
 		"handmade_game_",
 	); ok {
 		log.infof("reloaded dynamic library")
+		// Only update the timestamp on successful load
+		last_dynlib_mod_time = mod_time
 	} else {
 		log.error("failed to load dynamic library:", dynlib.last_error())
 		state.game_symbols = game_api.dummy_symbol_table
@@ -104,14 +124,8 @@ game_loop :: proc(state: ^State) {
 		return
 	}
 
-	RELOAD_PERIOD_NS :: 1_000_000_000
-	last_reload_ns: i64 = get_perf_counter_wall_ns()
-
 	for !state.display.close_requested {
-		if get_perf_counter_wall_ns() > last_reload_ns + RELOAD_PERIOD_NS {
-			load_game_symbols(state)
-			last_reload_ns = get_perf_counter_wall_ns()
-		}
+		reload_game_symbols(state)
 
 		counter_start_wall_ns := get_perf_counter_wall_ns()
 		counter_start_cpu_ns := get_perf_counter_cpu_ns()

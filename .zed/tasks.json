@@ -6,6 +6,7 @@
   {
     "label": "Reload",
     "command": "make reload",
+    "hide": "on_success",
   },
   {
     "label": "Gen wayland",

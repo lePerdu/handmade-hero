@@ -105,8 +105,7 @@ handmade_game_render_audio :: proc "c" (
 		buffer[0:buffer_len],
 		freq = 420.0,
 		amp = &state.audio_vol,
-		// amp_target = state.play_sound ? VOLUME : 0.0,
-		amp_target = VOLUME,
+		amp_target = state.play_sound ? VOLUME : 0.0,
 		phase = &state.audio_phase,
 	)
 }
