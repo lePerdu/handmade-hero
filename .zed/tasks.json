@@ -1,10 +1,14 @@
 [
   {
     "label": "Run",
-    "command": "odin run .",
+    "command": "make run",
+  },
+  {
+    "label": "Reload",
+    "command": "make reload",
   },
   {
     "label": "Gen wayland",
-    "command": "./gen-wayland",
+    "command": "make gen-wayland",
   },
 ]

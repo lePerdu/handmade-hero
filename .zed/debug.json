@@ -3,19 +3,21 @@
     "label": "Debug",
     "adapter": "CodeLLDB",
     "request": "launch",
-    "program": "handmade-hero",
+    "program": "build/game",
     "build": {
-      "command": "odin build . -debug",
+      "command": "make game",
     },
+    // TODO: Figure out how to debug the dynamic lib alongside the executable
+    // Especially when the lib is re-generated
   },
   {
     "label": "Debug scanner",
     "adapter": "CodeLLDB",
     "request": "launch",
-    "program": "scanner",
+    "program": "build/wayland-scanner",
     "args": ["/usr/share/wayland/wayland.xml", "wayland/wayland_protocol.odin"],
     "build": {
-      "command": "odin build wayland/scanner -debug",
+      "command": "make wayland-scanner",
     },
   },
 ]
