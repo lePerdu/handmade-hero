@@ -13,6 +13,9 @@ State :: struct {
 	play_sound: bool,
 	audio_vol: f32,
 	audio_phase: f32,
+	player_x: f32,
+	player_y: f32,
+	t_jump: f32,
 }
 
 get_game_context :: proc "contextless" (
@@ -34,6 +37,8 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	if !state.initialized {
 		state^ = {
 			initialized = true,
+			player_x = 100.0,
+			player_y = 100.0,
 		}
 	}
 	return state
@@ -48,20 +53,41 @@ handmade_game_update :: proc "contextless" (
 	context = get_game_context(memory)
 	state := get_game_state(memory)
 
-	// rate=24p/s
-	rate: f32 : 24.0
+	rate: f32 : 40.0 // px/sec
 	x_rate: f32 = 0.0
 	y_rate: f32 = 0.0
 
 	// Use +=/-= so that pressing 2 directions at the same time cancels out
-	if input.keyboard[.W].end_pressed || input.keyboard[.UP].end_pressed do y_rate += rate
-	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed do x_rate += rate
-	if input.keyboard[.S].end_pressed || input.keyboard[.Down].end_pressed do y_rate -= rate
-	if input.keyboard[.D].end_pressed || input.keyboard[.Right].end_pressed do x_rate -= rate
-	state.x_offset += f32(dt_ns) * x_rate / 1_000_000_000.0
-	state.y_offset += f32(dt_ns) * y_rate / 1_000_000_000.0
+	if input.keyboard[.W].end_pressed || input.keyboard[.UP].end_pressed {
+		y_rate -= rate
+	}
+	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed {
+		x_rate -= rate
+	}
+	if input.keyboard[.S].end_pressed || input.keyboard[.Down].end_pressed {
+		y_rate += rate
+	}
+	if input.keyboard[.D].end_pressed || input.keyboard[.Right].end_pressed {
+		x_rate += rate
+	}
+	// state.x_offset += f32(dt_ns) * x_rate / 1_000_000_000.0
+	// state.y_offset += f32(dt_ns) * y_rate / 1_000_000_000.0
+	// state.play_sound = input.keyboard[.Space].end_pressed
 
-	state.play_sound = input.keyboard[.Space].end_pressed
+	state.player_x += f32(dt_ns) * x_rate / 1_000_000_000.0
+	state.player_y += f32(dt_ns) * y_rate / 1_000_000_000.0
+
+	JUMP_DUR :: 1.5 // sec
+
+	jumps := api.button_input_press_count(input.keyboard[.Space])
+	if jumps > 0 {
+		state.t_jump = JUMP_DUR
+	}
+
+	if state.t_jump > 0 {
+		state.player_y += 10.0 * math.sin(math.TAU / JUMP_DUR * state.t_jump)
+		state.t_jump -= f32(dt_ns) / 1_000_000_000
+	}
 }
 
 @(export)
@@ -72,6 +98,7 @@ handmade_game_render :: proc "contextless" (
 	context = get_game_context(memory)
 	state := get_game_state(memory)
 	render_gradient(fb, int(state.x_offset), int(state.y_offset))
+	render_player(fb, int(state.player_x), int(state.player_y))
 }
 
 Pixel :: distinct u32
@@ -80,17 +107,18 @@ make_pixel :: proc(r, g, b: u8) -> Pixel {
 	return Pixel(u32(r) << 16 | u32(g) << 8 | u32(b))
 }
 
-frame_buffer_row :: proc(fb: api.Frame_Buffer, y: u32) -> []Pixel {
-	assert(y < fb.height)
+frame_buffer_row :: proc(fb: api.Frame_Buffer, y: int) -> []Pixel {
+	assert(y >= 0)
+	assert(y < int(fb.height))
 	return mem.slice_ptr(
-		(^Pixel)(uintptr(fb.base) + uintptr(y * fb.stride)),
+		(^Pixel)(uintptr(fb.base) + uintptr(y * int(fb.stride))),
 		int(fb.width),
 	)
 }
 
 render_gradient :: proc(fb: api.Frame_Buffer, x_offset, y_offset: int) {
 	for y in 0 ..< fb.height {
-		row := frame_buffer_row(fb, y)
+		row := frame_buffer_row(fb, int(y))
 		for x in 0 ..< fb.width {
 			// TODO: Is casting to u8 the "proper" way to wrap?
 			row[x] = make_pixel(
@@ -98,6 +126,23 @@ render_gradient :: proc(fb: api.Frame_Buffer, x_offset, y_offset: int) {
 				u8(int(y) + y_offset),
 				u8(int(x) + x_offset),
 			)
+		}
+	}
+}
+
+PLAYER_WIDTH :: 10
+PLAYER_HEIGHT :: 10
+PLAYER_COLOR :: 0xFFFFFF00
+
+render_player :: proc(fb: api.Frame_Buffer, player_x, player_y: int) {
+	for y_off in 0 ..< PLAYER_HEIGHT {
+		y := player_y + y_off
+		if y < 0 || int(fb.height) <= y do break
+		row := frame_buffer_row(fb, y)
+		for x_off in 0 ..< PLAYER_WIDTH {
+			x := player_x + x_off
+			if x < 0 || int(fb.width) <= x do break
+			row[x] = PLAYER_COLOR
 		}
 	}
 }

@@ -1,7 +1,6 @@
 package main
 
 import "base:intrinsics"
-import "base:runtime"
 import "core:c"
 import "core:dynlib"
 import "core:log"
@@ -22,6 +21,29 @@ State :: struct {
 	dynlib_path: string,
 	dynlib_load_mod_time: time.Time,
 	game_symbols: game_api.Symbol_Table,
+	record_state: Record_State,
+	recording_index: int,
+	playback_offset: int,
+	playback_timestamp_ns: i64,
+	recordings: [len(ENGINE_NUM_KEYS)]Recorded_Input,
+}
+
+Record_State :: enum {
+	None = 0,
+	Wait_Index,
+	Recording,
+	Playing,
+}
+
+Recorded_Input_Frame :: struct {
+	dt_ns: i64,
+	input: game_api.Input,
+}
+
+INIT_RECORDING_FRAME_COUNT :: 10 * 30
+
+Recorded_Input :: struct {
+	frames: [dynamic]Recorded_Input_Frame,
 }
 
 GAME_MEMORY_SIZE :: 1 << 20
@@ -185,6 +207,8 @@ game_loop :: proc(state: ^State) {
 		}
 
 		display_handle_poll(&state.display, display_poll_fd) or_break
+
+		// Handle engine control inputs
 		if game_api.button_input_pressed(
 			state.display.engine_keyboard_input[.Esc],
 		) {
@@ -193,29 +217,114 @@ game_loop :: proc(state: ^State) {
 		if game_api.button_input_toggled(
 			state.display.engine_keyboard_input[.P],
 		) {
-			game_api.keyboard_input_reset(&state.display.keyboard_input)
 			if paused {
 				paused = false
 				audio_resume(&state.audio)
+				game_api.keyboard_input_reset(&state.display.keyboard_input)
 			} else {
 				paused = true
 				audio_pause(&state.audio)
 			}
 		}
+		if game_api.button_input_toggled(
+			state.display.engine_keyboard_input[.L],
+		) {
+			switch state.record_state {
+			case .None:
+				state.record_state = .Wait_Index
+			case .Recording:
+				log.infof("stop recording #{}", state.recording_index)
+				state.record_state = .None
+			case .Playing:
+				log.infof("stop playback #{}", state.recording_index)
+				state.record_state = .None
+				game_api.keyboard_input_reset(&state.display.keyboard_input)
+			case .Wait_Index:
+				log.infof("cancel recording")
+				state.record_state = .None
+			}
+		}
+		#partial switch state.record_state {
+		case .Wait_Index:
+			for k, index in ENGINE_NUM_KEYS {
+				if game_api.button_input_pressed(
+					state.display.engine_keyboard_input[k],
+				) {
+					log.infof("start recording #{}", index)
+					state.recording_index = index
+					state.record_state = .Recording
+					state.recordings[state.recording_index] = {
+						frames = make(
+							[dynamic]Recorded_Input_Frame,
+							0,
+							INIT_RECORDING_FRAME_COUNT,
+						),
+					}
+					break
+				}
+			}
+		case .None:
+			for k, index in ENGINE_NUM_KEYS {
+				if game_api.button_input_pressed(
+					state.display.engine_keyboard_input[k],
+				) {
+					log.infof("start playback #{}", index)
+					state.recording_index = index
+					state.record_state = .Playing
+					state.playback_offset = 0
+					break
+				}
+			}
+		case .Recording: // No-op?
+		}
+		game_api.keyboard_input_reset(&state.display.engine_keyboard_input)
 
 		if !paused {
-			// TODO: Simulate at fixed DT? Would require running this potentially
-			// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
-			if now := get_perf_counter_wall_ns(); now >= next_update_time_ns {
-				// TODO: Don't create the Game_Input object every time
-				input := game_api.Input{state.display.keyboard_input}
-				state.game_symbols.update(
-					state.game_memory,
-					input,
-					now - last_update_time_ns,
-				)
-				game_api.keyboard_input_reset(&state.display.keyboard_input)
-				last_update_time_ns = now
+			if state.record_state == .Playing {
+				for {
+					if state.playback_offset >=
+					   len(state.recordings[state.recording_index].frames) {
+						log.infof("loop recording #{}", state.recording_index)
+						state.playback_offset = 0
+					}
+
+					input_frame :=
+						state.recordings[state.recording_index].frames[state.playback_offset]
+					next_update_time_ns =
+						last_update_time_ns + input_frame.dt_ns
+					if now := get_perf_counter_wall_ns();
+					   now >= next_update_time_ns {
+						state.game_symbols.update(
+							state.game_memory,
+							input_frame.input,
+							input_frame.dt_ns,
+						)
+						state.playback_offset += 1
+						last_update_time_ns = now
+					} else {
+						break
+					}
+				}
+			} else {
+				// TODO: Simulate at fixed DT? Would require running this potentially
+				// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
+				if now := get_perf_counter_wall_ns();
+				   now >= next_update_time_ns {
+					// TODO: Don't create the Game_Input object every time
+					input := game_api.Input{state.display.keyboard_input}
+					dt_ns := now - last_update_time_ns
+					if state.record_state == .Recording {
+						append(
+							&state.recordings[state.recording_index].frames,
+							Recorded_Input_Frame{dt_ns, input},
+						)
+					}
+					state.game_symbols.update(state.game_memory, input, dt_ns)
+					game_api.keyboard_input_reset(
+						&state.display.keyboard_input,
+					)
+					last_update_time_ns = now
+				}
 			}
 
 			// Only render after the previous frame is presented
@@ -245,7 +354,6 @@ game_loop :: proc(state: ^State) {
 			audio_handle_poll(state, audio_poll_fds) or_break
 		}
 
-		game_api.keyboard_input_reset(&state.display.engine_keyboard_input)
 		free_all(context.temp_allocator)
 
 		counter_total_wall_ns :=
@@ -287,6 +395,29 @@ Engine_Key :: enum {
 	P,
 	L,
 	Esc,
+	Num_0,
+	Num_1,
+	Num_2,
+	Num_3,
+	Num_4,
+	Num_5,
+	Num_6,
+	Num_7,
+	Num_8,
+	Num_9,
+}
+
+ENGINE_NUM_KEYS :: [?]Engine_Key {
+	.Num_0,
+	.Num_1,
+	.Num_2,
+	.Num_3,
+	.Num_4,
+	.Num_5,
+	.Num_6,
+	.Num_7,
+	.Num_8,
+	.Num_9,
 }
 
 Display_State :: struct {
@@ -957,12 +1088,42 @@ scancode_to_game_key :: proc(code: u32) -> (game_api.Key, bool) {
 	}
 }
 
+KEY_1 :: 2
+KEY_2 :: 3
+KEY_3 :: 4
+KEY_4 :: 5
+KEY_5 :: 6
+KEY_6 :: 7
+KEY_7 :: 8
+KEY_8 :: 9
+KEY_9 :: 10
+KEY_0 :: 11
 KEY_L :: 38
 KEY_P :: 25
 KEY_ESC :: 1
 
 scancode_to_engine_key :: proc(code: u32) -> (Engine_Key, bool) {
 	switch code {
+	case KEY_1:
+		return .Num_1, true
+	case KEY_2:
+		return .Num_2, true
+	case KEY_3:
+		return .Num_3, true
+	case KEY_4:
+		return .Num_4, true
+	case KEY_5:
+		return .Num_5, true
+	case KEY_6:
+		return .Num_6, true
+	case KEY_7:
+		return .Num_7, true
+	case KEY_8:
+		return .Num_8, true
+	case KEY_9:
+		return .Num_9, true
+	case KEY_0:
+		return .Num_0, true
 	case KEY_L:
 		return .L, true
 	case KEY_P:
