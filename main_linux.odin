@@ -185,14 +185,13 @@ game_loop :: proc(state: ^State) {
 		}
 
 		display_handle_poll(&state.display, display_poll_fd) or_break
-		if game_api.button_input_press_count(
-			   state.display.keyboard_input[.Esc],
-		   ) >
-		   0 {
+		if game_api.button_input_pressed(
+			state.display.engine_keyboard_input[.Esc],
+		) {
 			break
 		}
-		if game_api.button_input_press_count_odd(
-			state.display.keyboard_input[.Pause],
+		if game_api.button_input_toggled(
+			state.display.engine_keyboard_input[.P],
 		) {
 			game_api.keyboard_input_reset(&state.display.keyboard_input)
 			if paused {
@@ -246,6 +245,7 @@ game_loop :: proc(state: ^State) {
 			audio_handle_poll(state, audio_poll_fds) or_break
 		}
 
+		game_api.keyboard_input_reset(&state.display.engine_keyboard_input)
 		free_all(context.temp_allocator)
 
 		counter_total_wall_ns :=
@@ -283,6 +283,12 @@ Display_Buffer :: struct {
 	frame_buffer: game_api.Frame_Buffer,
 }
 
+Engine_Key :: enum {
+	P,
+	L,
+	Esc,
+}
+
 Display_State :: struct {
 	conn: wayland.Connection,
 
@@ -316,6 +322,8 @@ Display_State :: struct {
 	// Input
 	wl_keyboard: wayland.Wl_Keyboard,
 	keyboard_input: game_api.Keyboard_Input,
+	// Keys that are only used for the engine, not passed to the game code
+	engine_keyboard_input: [Engine_Key]game_api.Button_Input,
 
 	// Frame state
 	frame_callback: wayland.Wl_Callback,
@@ -909,15 +917,12 @@ KEY_W :: 17
 KEY_A :: 30
 KEY_S :: 31
 KEY_D :: 32
-KEY_P :: 25
-KEY_PAUSE_BREAK :: 119
 
 KEY_UP :: 103
 KEY_LEFT :: 105
 KEY_DOWN :: 108
 KEY_RIGHT :: 106
 KEY_SPACE :: 57
-KEY_ESC :: 1
 
 handle_keyboard_keymap :: proc(
 	state: ^Display_State,
@@ -927,7 +932,7 @@ handle_keyboard_keymap :: proc(
 	if event.fd > 0 do posix.close(event.fd)
 }
 
-scancode_to_key :: proc(code: u32) -> (game_api.Key, bool) {
+scancode_to_game_key :: proc(code: u32) -> (game_api.Key, bool) {
 	switch code {
 	case KEY_W:
 		return .W, true
@@ -947,12 +952,41 @@ scancode_to_key :: proc(code: u32) -> (game_api.Key, bool) {
 		return .Right, true
 	case KEY_SPACE:
 		return .Space, true
-	case KEY_ESC:
-		return .Esc, true
-	case KEY_P, KEY_PAUSE_BREAK:
-		return .Pause, true
 	case:
 		return {}, false
+	}
+}
+
+KEY_L :: 38
+KEY_P :: 25
+KEY_ESC :: 1
+
+scancode_to_engine_key :: proc(code: u32) -> (Engine_Key, bool) {
+	switch code {
+	case KEY_L:
+		return .L, true
+	case KEY_P:
+		return .P, true
+	case KEY_ESC:
+		return .Esc, true
+	case:
+		return {}, false
+	}
+}
+
+scancode_to_button :: proc(
+	state: ^Display_State,
+	code: u32,
+) -> (
+	^game_api.Button_Input,
+	bool,
+) {
+	if k, ok := scancode_to_game_key(code); ok {
+		return &state.keyboard_input[k], true
+	} else if k, ok := scancode_to_engine_key(code); ok {
+		return &state.engine_keyboard_input[k], true
+	} else {
+		return nil, false
 	}
 }
 
@@ -962,11 +996,8 @@ handle_keyboard_enter :: proc(
 ) {
 	scan_codes := mem.slice_data_cast([]u32, event.keys)
 	for code in scan_codes {
-		if k, ok := scancode_to_key(code); ok {
-			game_api.button_input_update(
-				&state.keyboard_input[k],
-				pressed = true,
-			)
+		if b, ok := scancode_to_button(state, code); ok {
+			game_api.button_input_update(b, pressed = true)
 		}
 	}
 }
@@ -986,11 +1017,8 @@ handle_keyboard_key :: proc(
 	event: wayland.Wl_Keyboard_Key_Event,
 ) {
 	// TODO: Track event time?
-	if k, ok := scancode_to_key(event.key); ok {
-		game_api.button_input_update(
-			&state.keyboard_input[k],
-			pressed = event.state == .Pressed,
-		)
+	if b, ok := scancode_to_button(state, event.key); ok {
+		game_api.button_input_update(b, pressed = event.state == .Pressed)
 	}
 }
 

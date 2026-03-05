@@ -1,5 +1,6 @@
 package game_api
 
+import "base:intrinsics"
 import "core:dynlib"
 
 // Game memory is opaque from the the outside to allow its structure to change
@@ -84,8 +85,6 @@ Key :: enum {
 	Right,
 	Down,
 	Space,
-	Esc,
-	Pause,
 }
 
 Button_Input :: struct {
@@ -111,7 +110,11 @@ button_input_press_count :: proc(button: Button_Input) -> u32 {
 	}
 }
 
-button_input_press_count_odd :: proc(button: Button_Input) -> bool {
+button_input_pressed :: proc(button: Button_Input) -> bool {
+	return button_input_press_count(button) > 0
+}
+
+button_input_toggled :: proc(button: Button_Input) -> bool {
 	return button_input_press_count(button) % 2 == 1
 }
 
@@ -123,7 +126,7 @@ button_input_update :: proc(button: ^Button_Input, pressed: bool) {
 }
 
 // Reset input data after a state change
-keyboard_input_reset :: proc(input: ^Keyboard_Input) {
+keyboard_input_reset :: proc(input: ^[$E]Button_Input) {
 	for &key in input {
 		key.transitions = 0
 	}
