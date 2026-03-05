@@ -9,7 +9,6 @@ import "core:math/rand"
 import "core:mem"
 import "core:os"
 import "core:path/filepath"
-import "core:path/slashpath"
 import "core:strings"
 import "core:sys/posix"
 import "core:time"
@@ -60,7 +59,7 @@ MIN_UPDATE_PERIOD_NS :: 1_000_000_000 / 30
 GAME_DYNLIB_PATH :: "game.so"
 
 get_dynlib_path :: proc() -> (path: string, err: os.Error) {
-	exec_dir := os.get_executable_directory(context.allocator) or_return
+	exec_dir := os.get_executable_directory(context.temp_allocator) or_return
 	return filepath.join({exec_dir, GAME_DYNLIB_PATH}, context.allocator)
 }
 
