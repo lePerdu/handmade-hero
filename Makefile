@@ -5,20 +5,23 @@ EXEC = $(BUILD)/game
 DYNLIB = $(BUILD)/game.so
 WAYLAND_SCANNER = $(BUILD)/wayland-scanner
 
+ODIN_FLAGS = -debug
+# ODIN_FLAGS = -o:speed
+
 all: game
 
 game: reload | $(BUILD)
-	odin build . -out:$(EXEC) -debug
+	odin build . $(ODIN_FLAGS) -out:$(EXEC)
 
 reload: | $(BUILD)
 	# Build into a temporary file first, then move to the final location so that
 	# the final file is never incomplete. Imporant since the file is watched
 	# and dynamically reloaded
-	odin build game -out:$(DYNLIB).tmp -build-mode:dynamic -debug
+	odin build game $(ODIN_FLAGS) -out:$(DYNLIB).tmp -build-mode:dynamic
 	mv $(DYNLIB).tmp $(DYNLIB)
 
 wayland-scanner: | $(BUILD)
-	odin build vendor/wayland/scanner -out:$(WAYLAND_SCANNER)
+	odin build vendor/wayland/scanner $(ODIN_FLAGS) -out:$(WAYLAND_SCANNER)
 
 run: game
 	./$(EXEC)
