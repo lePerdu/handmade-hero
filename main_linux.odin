@@ -19,12 +19,18 @@ import game_api "game/api"
 State :: struct {
 	display: Display_State,
 	audio: Audio_State,
+	running: bool,
+	paused: bool,
 	game_memory: game_api.Memory,
 	dynlib_path: string,
 	dynlib_load_mod_time: time.Time,
 	game_symbols: game_api.Symbol_Table,
-	record_state: Record_State,
-	recording_index: int,
+	recorder: Recorder,
+}
+
+Recorder :: struct {
+	state: Record_State,
+	index: int,
 	playback_offset: int,
 	playback_timestamp_ns: i64,
 	recordings: [len(ENGINE_NUM_KEYS)]Recorded_Input,
@@ -181,14 +187,11 @@ game_loop :: proc(state: ^State) {
 		return
 	}
 
-	paused := false
+	state.running = true
+	for state.running && !state.display.close_requested {
+		free_all(context.temp_allocator)
 
-	for !state.display.close_requested {
 		reload_game_symbols(state)
-
-		counter_start_wall_ns := get_perf_counter_wall_ns()
-		counter_start_cpu_ns := get_perf_counter_cpu_ns()
-		counter_start_cpu_cycles := get_perf_counter_cpu_cycles()
 
 		if poll_fd, ok := display_get_poll_descriptor(&state.display); ok {
 			display_poll_fd^ = poll_fd
@@ -216,187 +219,210 @@ game_loop :: proc(state: ^State) {
 
 		display_handle_poll(&state.display, display_poll_fd) or_break
 
-		// Handle engine control inputs
-		if game_api.button_input_pressed(
-			state.display.engine_keyboard_input[.Esc],
-		) {
-			break
-		}
-		if game_api.button_input_toggled(
-			state.display.engine_keyboard_input[.P],
-		) {
-			if paused {
-				paused = false
-				audio_resume(&state.audio)
-				game_api.keyboard_input_reset(&state.display.keyboard_input)
-			} else {
-				paused = true
-				audio_pause(&state.audio)
-			}
-		}
-		if game_api.button_input_toggled(
-			state.display.engine_keyboard_input[.L],
-		) {
-			switch state.record_state {
-			case .None:
-				state.record_state = .Wait_Index
-			case .Recording:
-				log.infof("stop recording #{}", state.recording_index)
-				rec := state.recordings[state.recording_index]
-				log.infof("start playback #{}", state.recording_index)
-				state.record_state = .Playing
-				state.playback_offset = 0
-				copy(state.game_memory.persistent, rec.game_mem_snapshot)
-			case .Playing:
-				log.infof("stop playback #{}", state.recording_index)
-				state.record_state = .None
-				game_api.keyboard_input_reset(&state.display.keyboard_input)
-			case .Wait_Index:
-				log.infof("cancel recording")
-				state.record_state = .None
-			}
-		}
-		#partial switch state.record_state {
-		case .Wait_Index:
-			for k, index in ENGINE_NUM_KEYS {
-				if game_api.button_input_pressed(
-					state.display.engine_keyboard_input[k],
-				) {
-					log.infof("start recording #{}", index)
-					state.recording_index = index
-					state.record_state = .Recording
-					state.recordings[state.recording_index] = {
-						game_mem_snapshot = slice.clone(
-							state.game_memory.persistent,
-						),
-						frames = make(
-							[dynamic]Recorded_Input_Frame,
-							0,
-							INIT_RECORDING_FRAME_COUNT,
-						),
-					}
-					break
-				}
-			}
-		case .None:
-			for k, index in ENGINE_NUM_KEYS {
-				if game_api.button_input_pressed(
-					state.display.engine_keyboard_input[k],
-				) {
-					rec := state.recordings[state.recording_index]
-					if rec.frames == nil || rec.game_mem_snapshot == nil {
-						log.warnf(
-							"cannot start playback #{}: recording not initialized",
-							index,
-						)
-						break
-					}
-					log.infof("start playback #{}", index)
-					state.recording_index = index
-					state.record_state = .Playing
-					state.playback_offset = 0
-					copy(state.game_memory.persistent, rec.game_mem_snapshot)
-					break
-				}
-			}
-		case .Recording: // No-op?
-		}
-		game_api.keyboard_input_reset(&state.display.engine_keyboard_input)
+		handle_engine_input(state)
 
-		if !paused {
-			if state.record_state == .Playing {
-				for {
-					if state.playback_offset >=
-					   len(state.recordings[state.recording_index].frames) {
-						log.infof("loop recording #{}", state.recording_index)
-						state.playback_offset = 0
-						copy(
-							state.game_memory.persistent,
-							state.recordings[state.recording_index].game_mem_snapshot,
-						)
-					}
+		if state.paused {
+			continue
+		}
 
-					input_frame :=
-						state.recordings[state.recording_index].frames[state.playback_offset]
-					next_update_time_ns =
-						last_update_time_ns + input_frame.dt_ns
-					if now := get_perf_counter_wall_ns();
-					   now >= next_update_time_ns {
-						state.game_symbols.update(
-							state.game_memory,
-							input_frame.input,
-							input_frame.dt_ns,
-						)
-						state.playback_offset += 1
-						last_update_time_ns = now
-					} else {
-						break
-					}
-				}
-			} else {
-				// TODO: Simulate at fixed DT? Would require running this potentially
-				// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
+		// Game update/render code
+
+		if state.recorder.state == .Playing {
+			for {
+				input_frame := recorder_playback_peek(state)
+
+				next_update_time_ns = last_update_time_ns + input_frame.dt_ns
 				if now := get_perf_counter_wall_ns();
 				   now >= next_update_time_ns {
-					// TODO: Don't create the Game_Input object every time
-					input := game_api.Input{state.display.keyboard_input}
-					dt_ns := now - last_update_time_ns
-					if state.record_state == .Recording {
-						append(
-							&state.recordings[state.recording_index].frames,
-							Recorded_Input_Frame{dt_ns, input},
-						)
-					}
-					state.game_symbols.update(state.game_memory, input, dt_ns)
-					game_api.keyboard_input_reset(
-						&state.display.keyboard_input,
+					state.game_symbols.update(
+						state.game_memory,
+						input_frame.input,
+						input_frame.dt_ns,
 					)
+					recorder_playback_next(state)
 					last_update_time_ns = now
-				}
-			}
-
-			// Only render after the previous frame is presented
-			// TODO: Render at a fixed rate even if some frames won't be presented?
-			if state.display.last_frame_time_ns > last_render_time_ns {
-				if fb, ok := display_get_back_buffer(&state.display); ok {
-					state.game_symbols.render(state.game_memory, fb)
-					last_render_time_ns = get_perf_counter_wall_ns()
-					// TODO: Fix/remove time for first frame, since it is incorrect
-					log.debugf(
-						"render time: {}ms",
-						f64(
-							last_render_time_ns -
-							state.display.last_frame_time_ns,
-						) /
-						1_000_000.0,
-					)
-					display_submit_frame(&state.display)
 				} else {
-					log.warn(
-						"back buffer not ready for rendering:",
-						state.display.buffers[state.display.back_buffer_index].wl_buffer,
-					)
+					break
 				}
 			}
-
-			audio_handle_poll(state, audio_poll_fds) or_break
+		} else {
+			// TODO: Simulate at fixed DT? Would require running this potentially
+			// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
+			if now := get_perf_counter_wall_ns(); now >= next_update_time_ns {
+				// TODO: Don't create the Game_Input object every time
+				input := game_api.Input{state.display.keyboard_input}
+				dt_ns := now - last_update_time_ns
+				recorder_record_input(&state.recorder, input, dt_ns)
+				state.game_symbols.update(state.game_memory, input, dt_ns)
+				game_api.keyboard_input_reset(&state.display.keyboard_input)
+				last_update_time_ns = now
+			}
 		}
 
-		free_all(context.temp_allocator)
+		// Only render after the previous frame is presented
+		// TODO: Render at a fixed rate even if some frames won't be presented?
+		if state.display.last_frame_time_ns > last_render_time_ns {
+			if fb, ok := display_get_back_buffer(&state.display); ok {
+				state.game_symbols.render(state.game_memory, fb)
+				last_render_time_ns = get_perf_counter_wall_ns()
+				// TODO: Fix/remove time for first frame, since it is incorrect
+				log.debugf(
+					"render time: {}ms",
+					f64(
+						last_render_time_ns - state.display.last_frame_time_ns,
+					) /
+					1_000_000.0,
+				)
+				display_submit_frame(&state.display)
+			} else {
+				log.warn(
+					"back buffer not ready for rendering:",
+					state.display.buffers[state.display.back_buffer_index].wl_buffer,
+				)
+			}
+		}
 
-		counter_total_wall_ns :=
-			get_perf_counter_wall_ns() - counter_start_wall_ns
-		counter_total_cpu_ns :=
-			get_perf_counter_cpu_ns() - counter_start_cpu_ns
-		counter_total_cpu_cycles :=
-			get_perf_counter_cpu_cycles() - counter_start_cpu_cycles
+		audio_handle_poll(state, audio_poll_fds) or_break
+	}
+}
 
-		log.debugf(
-			"event loop perf counter: wall={}ms cpu={}ms cycles={}K",
-			counter_total_wall_ns / 1_000_000,
-			counter_total_cpu_ns / 1_000_000,
-			counter_total_cpu_cycles / 1_000_000,
+handle_engine_input :: proc(state: ^State) {
+	// Handle engine control inputs
+	if game_api.button_input_pressed(
+		state.display.engine_keyboard_input[.Esc],
+	) {
+		state.running = false
+		return
+	}
+	if game_api.button_input_toggled(state.display.engine_keyboard_input[.P]) {
+		if state.paused {
+			state.paused = false
+			audio_resume(&state.audio)
+			game_api.keyboard_input_reset(&state.display.keyboard_input)
+		} else {
+			state.paused = true
+			audio_pause(&state.audio)
+		}
+	}
+	if game_api.button_input_toggled(state.display.engine_keyboard_input[.L]) {
+		recorder_press_record(state)
+	}
+	for k, index in ENGINE_NUM_KEYS {
+		if game_api.button_input_pressed(
+			state.display.engine_keyboard_input[k],
+		) {
+			recorder_select_index(state, index)
+			break
+		}
+	}
+	game_api.keyboard_input_reset(&state.display.engine_keyboard_input)
+}
+
+recorder_press_record :: proc(state: ^State) {
+	recorder := &state.recorder
+	switch recorder.state {
+	case .None:
+		recorder.state = .Wait_Index
+	case .Recording:
+		recorder_record_end(state)
+		recorder_playback_begin(state, recorder.index)
+	case .Playing:
+		recorder_playback_end(state)
+	case .Wait_Index:
+		log.infof("cancel recording")
+		recorder.state = .None
+	}
+}
+
+recorder_select_index :: proc(state: ^State, index: int) {
+	recorder := &state.recorder
+	#partial switch recorder.state {
+	case .Wait_Index:
+		recorder_record_begin(state, index)
+	case .None:
+		recorder_playback_begin(state, index)
+	case .Recording: // No-op?
+	}
+}
+
+recorder_record_input :: proc(
+	recorder: ^Recorder,
+	input: game_api.Input,
+	dt_ns: i64,
+) {
+	if recorder.state != .Recording do return
+
+	_, err := append(
+		&recorder.recordings[recorder.index].frames,
+		Recorded_Input_Frame{dt_ns, input},
+	)
+	assert(err == nil)
+}
+
+recorder_record_begin :: proc(state: ^State, index: int) {
+	log.infof("start recording #{}", index)
+	recorder := &state.recorder
+	recorder.index = index
+	recorder.state = .Recording
+	// TODO: Free mem for existing recording
+	recorder.recordings[recorder.index] = {
+		game_mem_snapshot = slice.clone(state.game_memory.persistent),
+		frames = make(
+			[dynamic]Recorded_Input_Frame,
+			0,
+			INIT_RECORDING_FRAME_COUNT,
+		),
+	}
+}
+
+recorder_record_end :: proc(state: ^State) {
+	assert(state.recorder.state == .Recording)
+	log.infof("stop recording #{}", state.recorder.index)
+	state.recorder.state = .None
+	// TODO: Save to disk?
+}
+
+recorder_playback_begin :: proc(state: ^State, index: int) {
+	recorder := &state.recorder
+	rec := recorder.recordings[recorder.index]
+	// TODO: Load from disk if not in memory?
+	if rec.frames == nil || rec.game_mem_snapshot == nil {
+		log.warnf(
+			"cannot start playback #{}: recording not initialized",
+			index,
 		)
+		return
+	}
+	log.infof("start playback #{}", index)
+	recorder.index = index
+	recorder.state = .Playing
+	recorder.playback_offset = 0
+	copy(state.game_memory.persistent, rec.game_mem_snapshot)
+}
+
+recorder_playback_end :: proc(state: ^State) {
+	assert(state.recorder.state == .Playing)
+	state.recorder.state = .None
+	game_api.keyboard_input_reset(&state.display.keyboard_input)
+}
+
+recorder_playback_peek :: proc(state: ^State) -> Recorded_Input_Frame {
+	recorder := &state.recorder
+	assert(recorder.state == .Playing)
+	rec := recorder.recordings[recorder.index]
+	return rec.frames[recorder.playback_offset]
+}
+
+recorder_playback_next :: proc(state: ^State) {
+	recorder := &state.recorder
+	assert(recorder.state == .Playing)
+	recorder.playback_offset += 1
+
+	rec := recorder.recordings[recorder.index]
+	if recorder.playback_offset >= len(rec.frames) {
+		log.infof("loop playback #{}", recorder.index)
+		recorder.playback_offset = 0
+		copy(state.game_memory.persistent, rec.game_mem_snapshot)
 	}
 }
 
@@ -538,9 +564,6 @@ display_init :: proc(state: ^Display_State) -> bool {
 		case:
 			process_wayland_messages(state)
 		}
-
-		// Just in case some setup events need to allocate later on
-		free_all(context.temp_allocator)
 	}
 
 	// Create window-related objects
