@@ -242,7 +242,11 @@ game_loop :: proc(state: ^State) {
 				state.record_state = .Wait_Index
 			case .Recording:
 				log.infof("stop recording #{}", state.recording_index)
-				state.record_state = .None
+				rec := state.recordings[state.recording_index]
+				log.infof("start playback #{}", state.recording_index)
+				state.record_state = .Playing
+				state.playback_offset = 0
+				copy(state.game_memory.persistent, rec.game_mem_snapshot)
 			case .Playing:
 				log.infof("stop playback #{}", state.recording_index)
 				state.record_state = .None
@@ -291,10 +295,7 @@ game_loop :: proc(state: ^State) {
 					state.recording_index = index
 					state.record_state = .Playing
 					state.playback_offset = 0
-					copy(
-						state.game_memory.persistent,
-						state.recordings[state.recording_index].game_mem_snapshot,
-					)
+					copy(state.game_memory.persistent, rec.game_mem_snapshot)
 					break
 				}
 			}
