@@ -25,15 +25,24 @@ State :: struct {
 }
 
 GAME_MEMORY_SIZE :: 1 << 20
+GAME_TEMP_MEMORY_SIZE :: 1 << 20
 
 main :: proc() {
 	context.logger = log.create_console_logger(lowest = .Info)
 
 	state: State
-	if mem_block, err := runtime.mem_alloc(GAME_MEMORY_SIZE); err == nil {
-		state.game_memory = game_api.Memory(raw_data(mem_block))
+	if mem_block, err := mem.alloc_bytes(GAME_MEMORY_SIZE); err == nil {
+		state.game_memory.persistent = mem_block
 	} else {
 		log.error("failed to allocate game memory:", err)
+		os.exit(1)
+	}
+
+	// TODO: Use virtual allocation with high size for temp memory?
+	if mem_block, err := mem.alloc_bytes(GAME_TEMP_MEMORY_SIZE); err == nil {
+		state.game_memory.temporary = mem_block
+	} else {
+		log.error("failed to allocate game temp memory:", err)
 		os.exit(1)
 	}
 
@@ -289,7 +298,7 @@ Display_State :: struct {
 
 	// SHM-related data (pointed is tracked in frame_buffer)
 	shm_fd: posix.FD,
-	shm_data: []u8,
+	shm_data: []byte,
 	// TODO: Do these need to be persistend long-term?
 	wl_shm_pool: wayland.Wl_Shm_Pool,
 
@@ -415,7 +424,7 @@ display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
 	destroy_shm_mapping(state.shm_fd, state.shm_data)
 
 	shm_err: Shm_Error
-	shm_data: []u8
+	shm_data: []byte
 	state.shm_fd, state.shm_data, shm_err = create_shm_file(
 		BUFFER_COUNT * uint(buffer_size),
 	)
@@ -996,7 +1005,7 @@ create_shm_file :: proc(
 	size: uint,
 ) -> (
 	shm_fd: posix.FD,
-	shm_buf: []u8,
+	shm_buf: []byte,
 	err: Shm_Error,
 ) {
 	name_buf := [255]u8{}
@@ -1038,7 +1047,7 @@ create_shm_file :: proc(
 	return
 }
 
-destroy_shm_mapping :: proc(shm_fd: posix.FD, shm_buf: []u8) {
+destroy_shm_mapping :: proc(shm_fd: posix.FD, shm_buf: []byte) {
 	if shm_fd == 0 {
 		return
 	}

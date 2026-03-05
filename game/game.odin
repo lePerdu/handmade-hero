@@ -7,27 +7,36 @@ import "core:mem"
 import "api"
 
 State :: struct {
+	// Relies on game memory being 0-initialized
+	initialized: bool,
 	x_offset, y_offset: f32,
 	play_sound: bool,
 	audio_vol: f32,
 	audio_phase: f32,
-	game_context: runtime.Context,
 }
 
-@(export)
-handmade_game_init :: proc "contextless" (
+get_game_context :: proc "contextless" (
 	memory: api.Memory,
-	memory_len: int,
-) {
-	// TODO: Return error code instead
-	assert_contextless(memory_len >= size_of(State))
-	state := (^State)(memory)
-	state^ = {
-		game_context = runtime.default_context(),
+) -> runtime.Context {
+	context = runtime.default_context()
+	context.allocator = runtime.panic_allocator()
+
+	temp_arena := (^mem.Arena)(raw_data(memory.temporary))
+	remaining_temp_mem := memory.temporary[size_of(type_of(temp_arena^)):]
+	mem.arena_init(temp_arena, remaining_temp_mem)
+	context.temp_allocator = mem.arena_allocator(temp_arena)
+	return context
+}
+
+get_game_state :: proc(memory: api.Memory) -> ^State {
+	assert(len(memory.persistent) >= size_of(State))
+	state := (^State)(raw_data(memory.persistent))
+	if !state.initialized {
+		state^ = {
+			initialized = true,
+		}
 	}
-	// TODO: Configure these to allocate from passed in memory block
-	state.game_context.allocator = runtime.nil_allocator()
-	state.game_context.temp_allocator = runtime.nil_allocator()
+	return state
 }
 
 @(export)
@@ -36,8 +45,8 @@ handmade_game_update :: proc "contextless" (
 	input: api.Input,
 	dt_ns: i64,
 ) {
-	state := (^State)(memory)
-	context = state.game_context
+	context = get_game_context(memory)
+	state := get_game_state(memory)
 
 	// rate=24p/s
 	rate: f32 : 24.0
@@ -60,8 +69,8 @@ handmade_game_render :: proc "contextless" (
 	memory: api.Memory,
 	fb: api.Frame_Buffer,
 ) {
-	state := (^State)(memory)
-	context = state.game_context
+	context = get_game_context(memory)
+	state := get_game_state(memory)
 	render_gradient(fb, int(state.x_offset), int(state.y_offset))
 }
 
@@ -102,8 +111,8 @@ handmade_game_render_audio :: proc "contextless" (
 	timings: api.Audio_Timings,
 	buffer: []api.Audio_Frame,
 ) {
-	state := (^State)(memory)
-	context = state.game_context
+	context = get_game_context(memory)
+	state := get_game_state(memory)
 
 	generate_sine(
 		timings,

@@ -1,5 +1,6 @@
 package alsa
 
+import "core:mem"
 // Incomplete bindings for alsa-lib PCM (mostly just what I needed)
 
 import "base:runtime"
@@ -321,8 +322,11 @@ pcm_hw_params_alloc :: proc(
 	params: Pcm_Hw_Params,
 	err: runtime.Allocator_Error,
 ) #optional_allocator_error {
-	buf := make([]u8, pcm_hw_params_sizeof(), allocator) or_return
-	return Pcm_Hw_Params(&buf[0]), nil
+	ptr := mem.alloc(
+		int(pcm_hw_params_sizeof()),
+		allocator = allocator,
+	) or_return
+	return Pcm_Hw_Params(ptr), nil
 }
 
 pcm_sw_params_alloc :: proc(
@@ -331,6 +335,9 @@ pcm_sw_params_alloc :: proc(
 	params: Pcm_Sw_Params,
 	err: runtime.Allocator_Error,
 ) #optional_allocator_error {
-	buf := make([]u8, pcm_sw_params_sizeof(), allocator) or_return
-	return Pcm_Sw_Params(&buf[0]), nil
+	ptr := mem.alloc(
+		int(pcm_sw_params_sizeof()),
+		allocator = allocator,
+	) or_return
+	return Pcm_Sw_Params(ptr), nil
 }

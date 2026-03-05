@@ -4,9 +4,12 @@ import "core:dynlib"
 
 // Game memory is opaque from the the outside to allow its structure to change
 // between share library loads
-Memory :: distinct rawptr
+Memory :: struct {
+	persistent: []byte,
+	// TODO: Replace with virtual mem arena?
+	temporary: []byte,
+}
 
-Init_Proc :: #type proc "contextless" (memory: Memory, memory_len: int)
 // TODO: Can these use the odin calling convention even when coming from a
 // shared library?
 Update_Proc :: #type proc "contextless" (
@@ -24,20 +27,17 @@ Render_Audio_Proc :: #type proc "contextless" (
 // Symbol table for use with core:dynlib.initialize_symbols
 Symbol_Table :: struct {
 	__handle: dynlib.Library,
-	init: Init_Proc,
 	update: Update_Proc,
 	render: Render_Proc,
 	render_audio: Render_Audio_Proc,
 }
 
 dummy_symbol_table := Symbol_Table {
-	init = dummy_init,
 	update = dummy_update,
 	render = dummy_render,
 	render_audio = dummy_render_audio,
 }
 
-dummy_init :: proc "contextless" (memory: Memory, memory_len: int) {}
 dummy_update :: proc "contextless" (
 	memory: Memory,
 	input: Input,
