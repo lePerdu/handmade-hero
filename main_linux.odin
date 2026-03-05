@@ -7,7 +7,7 @@ import "core:dynlib"
 import "core:log"
 import "core:math/rand"
 import "core:mem"
-import os "core:os/os2"
+import "core:os"
 import "core:path/filepath"
 import "core:path/slashpath"
 import "core:strings"
@@ -61,7 +61,7 @@ GAME_DYNLIB_PATH :: "game.so"
 
 get_dynlib_path :: proc() -> (path: string, err: os.Error) {
 	exec_dir := os.get_executable_directory(context.allocator) or_return
-	return filepath.join({exec_dir, GAME_DYNLIB_PATH})
+	return filepath.join({exec_dir, GAME_DYNLIB_PATH}, context.allocator)
 }
 
 reload_game_symbols :: proc(state: ^State) {
