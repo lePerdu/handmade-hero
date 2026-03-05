@@ -8,7 +8,9 @@ import "core:math/rand"
 import "core:mem"
 import "core:os"
 import "core:path/filepath"
+import "core:slice"
 import "core:strings"
+import "core:sys/linux"
 import "core:sys/posix"
 import "core:time"
 
@@ -43,28 +45,34 @@ Recorded_Input_Frame :: struct {
 INIT_RECORDING_FRAME_COUNT :: 10 * 30
 
 Recorded_Input :: struct {
+	game_mem_snapshot: []byte,
 	frames: [dynamic]Recorded_Input_Frame,
 }
 
 GAME_MEMORY_SIZE :: 1 << 20
-GAME_TEMP_MEMORY_SIZE :: 1 << 20
+GAME_TEMP_MEMORY_SIZE :: 1 << 30
+// Fixed address, so that it's possible to save/restore game state across
+// processes
+// TODO: Change this for 32-bit platforms
+GAME_PERSIST_MEM_ADDR: uintptr : 0x0000_1000_0000_0000
 
 main :: proc() {
 	context.logger = log.create_console_logger(lowest = .Info)
 
 	state: State
-	if mem_block, err := mem.alloc_bytes(GAME_MEMORY_SIZE); err == nil {
-		state.game_memory.persistent = mem_block
-	} else {
-		log.error("failed to allocate game memory:", err)
-		os.exit(1)
-	}
 
-	// TODO: Use virtual allocation with high size for temp memory?
-	if mem_block, err := mem.alloc_bytes(GAME_TEMP_MEMORY_SIZE); err == nil {
-		state.game_memory.temporary = mem_block
+	TOTAL_MEM_SIZE :: GAME_MEMORY_SIZE + GAME_TEMP_MEMORY_SIZE
+	if ptr, err := linux.mmap(
+		GAME_PERSIST_MEM_ADDR,
+		TOTAL_MEM_SIZE,
+		{.READ, .WRITE},
+		{.FIXED_NOREPLACE, .PRIVATE, .NORESERVE, .ANONYMOUS},
+	); err == nil {
+		block := mem.byte_slice(ptr, TOTAL_MEM_SIZE)
+		state.game_memory.persistent = block[:GAME_MEMORY_SIZE]
+		state.game_memory.temporary = block[GAME_MEMORY_SIZE:]
 	} else {
-		log.error("failed to allocate game temp memory:", err)
+		log.error("failed to allocate game memory", err)
 		os.exit(1)
 	}
 
@@ -254,6 +262,9 @@ game_loop :: proc(state: ^State) {
 					state.recording_index = index
 					state.record_state = .Recording
 					state.recordings[state.recording_index] = {
+						game_mem_snapshot = slice.clone(
+							state.game_memory.persistent,
+						),
 						frames = make(
 							[dynamic]Recorded_Input_Frame,
 							0,
@@ -268,10 +279,22 @@ game_loop :: proc(state: ^State) {
 				if game_api.button_input_pressed(
 					state.display.engine_keyboard_input[k],
 				) {
+					rec := state.recordings[state.recording_index]
+					if rec.frames == nil || rec.game_mem_snapshot == nil {
+						log.warnf(
+							"cannot start playback #{}: recording not initialized",
+							index,
+						)
+						break
+					}
 					log.infof("start playback #{}", index)
 					state.recording_index = index
 					state.record_state = .Playing
 					state.playback_offset = 0
+					copy(
+						state.game_memory.persistent,
+						state.recordings[state.recording_index].game_mem_snapshot,
+					)
 					break
 				}
 			}
@@ -286,6 +309,10 @@ game_loop :: proc(state: ^State) {
 					   len(state.recordings[state.recording_index].frames) {
 						log.infof("loop recording #{}", state.recording_index)
 						state.playback_offset = 0
+						copy(
+							state.game_memory.persistent,
+							state.recordings[state.recording_index].game_mem_snapshot,
+						)
 					}
 
 					input_frame :=
