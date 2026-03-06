@@ -1632,6 +1632,7 @@ Audio_State :: struct {
 	pcm: alsa.Pcm,
 	buffer_size: alsa.Pcm_Uframes,
 	period_size: alsa.Pcm_Uframes,
+	buffer: []game_api.Audio_Frame,
 	sample_rate: uint,
 	supports_pause: bool,
 }
@@ -1642,7 +1643,10 @@ Audio_Error :: enum {
 }
 
 audio_init :: proc(state: ^Audio_State) -> Audio_Error {
-	if err := alsa.pcm_open(&state.pcm, "default", .Playback, .Nonblock);
+	// Using "default" or "pipewire" leads to buzzing sound and blocks system
+	// audio while paused in the debugger. Pulse audio also forces using
+	// MMAP_INTERLEAVED, but that's alright for now
+	if err := alsa.pcm_open(&state.pcm, "pulse", .Playback, .Nonblock);
 	   err != 0 {
 		log.error("failed to open audio device:", alsa.strerror(err))
 		return .Failed
@@ -1650,20 +1654,6 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 
 	TARGET_SAMPLE_RATE :: 48000
 	TARGET_FRAME_US :: 1_000_000 / 30
-
-	// if err := alsa.pcm_set_params(
-	// 	state.pcm,
-	// 	format = .S16,
-	// 	access = .MMAP_INTERLEAVED,
-	// 	channels = 2,
-	// 	rate = TARGET_SAMPLE_RATE,
-	// 	soft_resample = .Enable,
-	// 	// TODO: Play around with buffer/period size
-	// 	latency = TARGET_FRAME_US * 2,
-	// ); err != 0 {
-	// 	log.error("failed to configure audio device:", alsa.strerror(err))
-	// 	return .Failed
-	// }
 
 	// TODO: Error handling
 	// TODO: Alignment?
@@ -1684,7 +1674,7 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 	if err := alsa.pcm_hw_params_set_access(
 		state.pcm,
 		hw_params,
-		.MMAP_INTERLEAVED,
+		.RW_INTERLEAVED,
 	); err != 0 {
 		log.error("audio: failed to set access mode:", alsa.strerror(err))
 		return .Failed
@@ -1773,7 +1763,6 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 		log.error("audio: failed to set avail min:", alsa.strerror(err))
 		return .Failed
 	}
-	// Disable auto-start
 	if err := alsa.pcm_sw_params_set_start_threshold(
 		state.pcm,
 		sw_params,
@@ -1782,17 +1771,13 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 		log.error("audio: failed to set start threshold:", alsa.strerror(err))
 		return .Failed
 	}
-	// Only stop when empty
-	if err := alsa.pcm_sw_params_set_stop_threshold(state.pcm, sw_params, 0);
-	   err != 0 {
-		log.error("audio: failed to set stop threshold:", alsa.strerror(err))
-		return .Failed
-	}
 
 	if err := alsa.pcm_sw_params(state.pcm, sw_params); err != 0 {
 		log.error("audio: failed to set SW params:", alsa.strerror(err))
 		return .Failed
 	}
+
+	state.buffer = make([]game_api.Audio_Frame, state.buffer_size)
 
 	log.infof(
 		"audio device config: buffer_size={} period_size={}",
@@ -1908,6 +1893,28 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 			return nil
 		}
 
+		buf := audio.buffer[:avail]
+
+		timings := game_api.Audio_Timings {
+			write_timestamp_ns = write_timestamp_ns,
+			sample_rate = audio.sample_rate,
+		}
+		state.game_symbols.render_audio(state.game_memory, timings, buf)
+
+		// Should always return avail since we just asked how much space there
+		// is
+		if res := alsa.pcm_writei(
+			audio.pcm,
+			raw_data(buf),
+			alsa.Pcm_Uframes(avail),
+		); res < 0 {
+			log.error("failed to write samples:", alsa.strerror(i32(res)))
+			return .Failed
+		} else if res != avail {
+			log.warnf("write too few samples: expected={} got={}", avail, res)
+		}
+
+		/* MMAP_INTERLEAVED access mode
 		// TODO: Repeat just this section if possible to avoid re-checking status?
 		area: [^]alsa.Pcm_Channel_Area // Multi-pointer for the API
 		offset: alsa.Pcm_Uframes
@@ -1938,6 +1945,7 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 		} else if alsa.Pcm_Uframes(err) != space {
 			log.warnf("short commit: expected={} got={}", space, err)
 		}
+		*/
 
 		// Start after putting something in the buffer
 		if need_start {
