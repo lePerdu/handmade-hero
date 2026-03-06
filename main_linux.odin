@@ -3,6 +3,7 @@ package main
 import "base:intrinsics"
 import "core:c"
 import "core:dynlib"
+import "core:fmt"
 import "core:log"
 import "core:math/rand"
 import "core:mem"
@@ -22,6 +23,8 @@ State :: struct {
 	running: bool,
 	paused: bool,
 	game_memory: game_api.Memory,
+	exec_dir: string,
+	data_dir: string,
 	dynlib_path: string,
 	dynlib_load_mod_time: time.Time,
 	game_symbols: game_api.Symbol_Table,
@@ -33,7 +36,7 @@ Recorder :: struct {
 	index: int,
 	playback_offset: int,
 	playback_timestamp_ns: i64,
-	recordings: [len(ENGINE_NUM_KEYS)]Recorded_Input,
+	recordings: [len(ENGINE_NUM_KEYS)]Recording,
 }
 
 Record_State :: enum {
@@ -43,16 +46,16 @@ Record_State :: enum {
 	Playing,
 }
 
-Recorded_Input_Frame :: struct {
+Input_Frame :: struct {
 	dt_ns: i64,
 	input: game_api.Input,
 }
 
 INIT_RECORDING_FRAME_COUNT :: 10 * 30
 
-Recorded_Input :: struct {
+Recording :: struct {
 	game_mem_snapshot: []byte,
-	frames: [dynamic]Recorded_Input_Frame,
+	frames: [dynamic]Input_Frame,
 }
 
 GAME_MEMORY_SIZE :: 1 << 20
@@ -66,6 +69,7 @@ main :: proc() {
 	context.logger = log.create_console_logger(lowest = .Info)
 
 	state: State
+	setup_paths(&state)
 
 	TOTAL_MEM_SIZE :: GAME_MEMORY_SIZE + GAME_TEMP_MEMORY_SIZE
 	if ptr, err := linux.mmap(
@@ -78,18 +82,12 @@ main :: proc() {
 		state.game_memory.persistent = block[:GAME_MEMORY_SIZE]
 		state.game_memory.temporary = block[GAME_MEMORY_SIZE:]
 	} else {
-		log.error("failed to allocate game memory", err)
-		os.exit(1)
+		log.panic("failed to allocate game memory", err)
 	}
 
 	// Start with dummy symbols
 	state.game_symbols = game_api.dummy_symbol_table
-	if path, err := get_dynlib_path(); err == nil {
-		state.dynlib_path = path
-	} else {
-		log.error("failed to get dynlib path:", err)
-		os.exit(1)
-	}
+
 	reload_game_symbols(&state)
 
 	if !display_init(&state.display) do os.exit(1)
@@ -99,14 +97,35 @@ main :: proc() {
 	game_loop(&state)
 }
 
+setup_paths :: proc(state: ^State) {
+	if dir, err := os.get_executable_directory(context.allocator); err == nil {
+		state.exec_dir = dir
+	} else {
+		log.panic("failed to get executable directory:", err)
+	}
+
+	if path, err := filepath.join(
+		{state.exec_dir, "..", "data"},
+		context.allocator,
+	); err == nil {
+		state.data_dir = path
+	} else {
+		log.panic("failed to get data directory:", err)
+	}
+
+	if path, err := filepath.join(
+		{state.exec_dir, GAME_DYNLIB_PATH},
+		context.allocator,
+	); err == nil {
+		state.dynlib_path = path
+	} else {
+		log.panic("failed to build dynlib path:", err)
+	}
+}
+
 MIN_UPDATE_PERIOD_NS :: 1_000_000_000 / 30
 
 GAME_DYNLIB_PATH :: "game.so"
-
-get_dynlib_path :: proc() -> (path: string, err: os.Error) {
-	exec_dir := os.get_executable_directory(context.temp_allocator) or_return
-	return filepath.join({exec_dir, GAME_DYNLIB_PATH}, context.allocator)
-}
 
 reload_game_symbols :: proc(state: ^State) {
 	mod_time, err := os.modification_time_by_path(state.dynlib_path)
@@ -229,7 +248,7 @@ game_loop :: proc(state: ^State) {
 
 		if state.recorder.state == .Playing {
 			for {
-				input_frame := recorder_playback_peek(state)
+				input_frame := playback_peek_frame(state)
 
 				next_update_time_ns = last_update_time_ns + input_frame.dt_ns
 				if now := get_perf_counter_wall_ns();
@@ -239,7 +258,7 @@ game_loop :: proc(state: ^State) {
 						input_frame.input,
 						input_frame.dt_ns,
 					)
-					recorder_playback_next(state)
+					playback_advance_frame(state)
 					last_update_time_ns = now
 				} else {
 					break
@@ -252,7 +271,7 @@ game_loop :: proc(state: ^State) {
 				// TODO: Don't create the Game_Input object every time
 				input := game_api.Input{state.display.keyboard_input}
 				dt_ns := now - last_update_time_ns
-				recorder_record_input(&state.recorder, input, dt_ns)
+				record_input_frame(&state.recorder, input, dt_ns)
 				state.game_symbols.update(state.game_memory, input, dt_ns)
 				game_api.keyboard_input_reset(&state.display.keyboard_input)
 				last_update_time_ns = now
@@ -305,47 +324,47 @@ handle_engine_input :: proc(state: ^State) {
 		}
 	}
 	if game_api.button_input_toggled(state.display.engine_keyboard_input[.L]) {
-		recorder_press_record(state)
+		record_toggle(state)
 	}
 	for k, index in ENGINE_NUM_KEYS {
 		if game_api.button_input_pressed(
 			state.display.engine_keyboard_input[k],
 		) {
-			recorder_select_index(state, index)
+			record_select_index(state, index)
 			break
 		}
 	}
 	game_api.keyboard_input_reset(&state.display.engine_keyboard_input)
 }
 
-recorder_press_record :: proc(state: ^State) {
+record_toggle :: proc(state: ^State) {
 	recorder := &state.recorder
 	switch recorder.state {
 	case .None:
 		recorder.state = .Wait_Index
 	case .Recording:
-		recorder_record_end(state)
-		recorder_playback_begin(state, recorder.index)
+		record_end(state)
+		playback_begin(state, recorder.index)
 	case .Playing:
-		recorder_playback_end(state)
+		playback_end(state)
 	case .Wait_Index:
 		log.infof("cancel recording")
 		recorder.state = .None
 	}
 }
 
-recorder_select_index :: proc(state: ^State, index: int) {
+record_select_index :: proc(state: ^State, index: int) {
 	recorder := &state.recorder
 	#partial switch recorder.state {
 	case .Wait_Index:
-		recorder_record_begin(state, index)
+		record_begin(state, index)
 	case .None:
-		recorder_playback_begin(state, index)
+		playback_begin(state, index)
 	case .Recording: // No-op?
 	}
 }
 
-recorder_record_input :: proc(
+record_input_frame :: proc(
 	recorder: ^Recorder,
 	input: game_api.Input,
 	dt_ns: i64,
@@ -354,45 +373,56 @@ recorder_record_input :: proc(
 
 	_, err := append(
 		&recorder.recordings[recorder.index].frames,
-		Recorded_Input_Frame{dt_ns, input},
+		Input_Frame{dt_ns, input},
 	)
 	assert(err == nil)
 }
 
-recorder_record_begin :: proc(state: ^State, index: int) {
+record_begin :: proc(state: ^State, index: int) {
 	log.infof("start recording #{}", index)
 	recorder := &state.recorder
 	recorder.index = index
 	recorder.state = .Recording
-	// TODO: Free mem for existing recording
-	recorder.recordings[recorder.index] = {
+	rec := &recorder.recordings[recorder.index]
+	recording_destroy(rec)
+	rec^ = {
 		game_mem_snapshot = slice.clone(state.game_memory.persistent),
-		frames = make(
-			[dynamic]Recorded_Input_Frame,
-			0,
-			INIT_RECORDING_FRAME_COUNT,
-		),
+		frames = make([dynamic]Input_Frame, 0, INIT_RECORDING_FRAME_COUNT),
 	}
 }
 
-recorder_record_end :: proc(state: ^State) {
+record_end :: proc(state: ^State) {
 	assert(state.recorder.state == .Recording)
 	log.infof("stop recording #{}", state.recorder.index)
 	state.recorder.state = .None
-	// TODO: Save to disk?
+
+	if ok := save_recording(
+		state.data_dir,
+		state.recorder.index,
+		state.recorder.recordings[state.recorder.index],
+	); ok {
+		log.infof("saved recording #{} to disk", state.recorder.index)
+	}
 }
 
-recorder_playback_begin :: proc(state: ^State, index: int) {
+playback_begin :: proc(state: ^State, index: int) {
 	recorder := &state.recorder
-	rec := recorder.recordings[recorder.index]
-	// TODO: Load from disk if not in memory?
-	if rec.frames == nil || rec.game_mem_snapshot == nil {
+	rec := &recorder.recordings[index]
+
+	// TODO: Prefer in-memory copy or the one on disk?
+	if loaded, ok := load_recording(state.data_dir, index); ok {
+		log.infof("loaded recording #{} from disk", index)
+		recording_destroy(rec)
+		rec^ = loaded
+	} else if rec.frames == nil || rec.game_mem_snapshot == nil {
 		log.warnf(
-			"cannot start playback #{}: recording not initialized",
+			"cannot start playback #{}: " +
+			"recording not initialized and not found on disk",
 			index,
 		)
 		return
 	}
+
 	log.infof("start playback #{}", index)
 	recorder.index = index
 	recorder.state = .Playing
@@ -400,20 +430,21 @@ recorder_playback_begin :: proc(state: ^State, index: int) {
 	copy(state.game_memory.persistent, rec.game_mem_snapshot)
 }
 
-recorder_playback_end :: proc(state: ^State) {
+playback_end :: proc(state: ^State) {
 	assert(state.recorder.state == .Playing)
+	log.infof("stop playback #{}", state.recorder.index)
 	state.recorder.state = .None
 	game_api.keyboard_input_reset(&state.display.keyboard_input)
 }
 
-recorder_playback_peek :: proc(state: ^State) -> Recorded_Input_Frame {
+playback_peek_frame :: proc(state: ^State) -> Input_Frame {
 	recorder := &state.recorder
 	assert(recorder.state == .Playing)
 	rec := recorder.recordings[recorder.index]
 	return rec.frames[recorder.playback_offset]
 }
 
-recorder_playback_next :: proc(state: ^State) {
+playback_advance_frame :: proc(state: ^State) {
 	recorder := &state.recorder
 	assert(recorder.state == .Playing)
 	recorder.playback_offset += 1
@@ -424,6 +455,155 @@ recorder_playback_next :: proc(state: ^State) {
 		recorder.playback_offset = 0
 		copy(state.game_memory.persistent, rec.game_mem_snapshot)
 	}
+}
+
+save_recording :: proc(
+	data_dir: string,
+	index: int,
+	rec: Recording,
+) -> (
+	ok: bool,
+) {
+	// TODO: Use mmap'd files instead of manual serializing?
+
+	LOG_PREFIX :: "cannot save recording: "
+	err: os.Error
+	if !os.exists(data_dir) {
+		if err = os.make_directory_all(data_dir); err != nil {
+			log.error(LOG_PREFIX + "failed to create data directory:", err)
+			return
+		}
+	}
+
+	file_path: string
+	if file_path, err = get_recording_file_path(data_dir, index); err != nil {
+		log.error(LOG_PREFIX + "failed to build file path:", err)
+		return
+	}
+
+	file: ^os.File
+	if file, err = os.create(file_path); err != nil {
+		log.error(LOG_PREFIX + "failed to create file:", err)
+		return
+	}
+	defer os.close(file)
+
+	// Might as well reserve the size first
+	total_size := len(rec.game_mem_snapshot) + slice.size(rec.frames[:])
+	if err = os.truncate(file, i64(total_size)); err != nil {
+		log.error(LOG_PREFIX + "failed to set file size:", err)
+		return
+	}
+
+	// TODO: Write some metadata in the file so that the parser can detect when
+	// the game memory size / input frame size changes
+	if _, err = os.write(file, rec.game_mem_snapshot); err != nil {
+		log.error(LOG_PREFIX + "failed to write game memory:", err)
+		return
+	}
+	if _, err = os.write_slice(file, rec.frames[:]); err != nil {
+		log.error(LOG_PREFIX + "failed to write input frames:", err)
+		return
+	}
+	end_pos: i64
+	if end_pos, err = os.seek(file, 0, .Current); err != nil {
+		end_pos = 0
+	}
+	if end_pos != i64(total_size) {
+		log.error(
+			LOG_PREFIX + "unexpected file size: expected={} actual={}",
+			total_size,
+			end_pos,
+		)
+		return
+	}
+
+	ok = true
+	return
+}
+
+load_recording :: proc(
+	data_dir: string,
+	index: int,
+) -> (
+	rec: Recording,
+	ok: bool,
+) {
+	LOG_PREFIX :: "cannot load recording: "
+	err: os.Error
+
+	file_path: string
+	if file_path, err = get_recording_file_path(data_dir, index); err != nil {
+		log.error(LOG_PREFIX + "failed to build file path:", err)
+		return
+	}
+
+	file: ^os.File
+	if file, err = os.open(file_path); err != nil {
+		return
+	}
+	defer os.close(file)
+
+	total_size: i64
+	if total_size, err = os.file_size(file); err == nil {
+		total_size = 0
+	}
+
+	if total_size < GAME_MEMORY_SIZE {
+		log.warn(
+			LOG_PREFIX + "file too small: expected>={}, got={}",
+			GAME_MEMORY_SIZE,
+			total_size,
+		)
+		return
+	}
+
+	frames_size := total_size - GAME_MEMORY_SIZE
+	if frames_size % size_of(Input_Frame) != 0 {
+		log.warn(
+			LOG_PREFIX +
+			"file size not aligned to input frames: total={} frames={}",
+			total_size,
+			frames_size,
+		)
+		return
+	}
+	frames_len := int(frames_size / size_of(Input_Frame))
+
+	rec.game_mem_snapshot = make([]byte, GAME_MEMORY_SIZE)
+	rec.frames = make([dynamic]Input_Frame, frames_len)
+	// These should be freed on failure to avoid leaking memory
+
+	if _, err = os.read(file, rec.game_mem_snapshot); err != nil {
+		log.error(LOG_PREFIX + "failed to read game memory:", err)
+		recording_destroy(&rec)
+		return
+	}
+	if _, err = os.read_slice(file, rec.frames[:]); err != nil {
+		log.error(LOG_PREFIX + "failed to read input frames:", err)
+		recording_destroy(&rec)
+		return
+	}
+
+	ok = true
+	return
+}
+
+get_recording_file_path :: proc(
+	data_dir: string,
+	index: int,
+) -> (
+	path: string,
+	err: os.Error,
+) {
+	file_name := fmt.tprintf("input_recording_{}.hmi", index)
+	return filepath.join({data_dir, file_name}, context.temp_allocator)
+}
+
+recording_destroy :: proc(rec: ^Recording) {
+	delete(rec.game_mem_snapshot)
+	delete(rec.frames)
+	rec^ = {}
 }
 
 // Video

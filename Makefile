@@ -1,6 +1,7 @@
 WAYLAND_DATA_DIR ?= /usr/share
 
 BUILD = build
+DATA = data
 EXEC = $(BUILD)/game
 DYNLIB = $(BUILD)/game.so
 WAYLAND_SCANNER = $(BUILD)/wayland-scanner
@@ -40,4 +41,10 @@ $(BUILD):
 clean:
 	$(RM) -r $(BUILD)
 
-.PHONY: all run game reload wayland-scanner gen-wayland clean
+clean-data:
+	$(RM) -r $(DATA)
+
+clean-all: clean clean-data
+
+.PHONY: all run game reload wayland-scanner gen-wayland \
+	clean clean-data clean-all
