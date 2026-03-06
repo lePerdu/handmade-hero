@@ -15,6 +15,7 @@ State :: struct {
 	audio_phase: f32,
 	player_x: f32,
 	player_y: f32,
+	cursor_x, cursor_y: f32,
 	t_jump: f32,
 }
 
@@ -53,6 +54,10 @@ handmade_game_update :: proc "contextless" (
 	context = get_game_context(memory)
 	state := get_game_state(memory)
 
+	state.cursor_x = input.mouse.pos_x
+	state.cursor_y = input.mouse.pos_y
+	state.play_sound = input.mouse.buttons[.Left].end_pressed
+
 	rate: f32 : 40.0 // px/sec
 	x_rate: f32 = 0.0
 	y_rate: f32 = 0.0
@@ -80,7 +85,7 @@ handmade_game_update :: proc "contextless" (
 	JUMP_DUR :: 1.5 // sec
 
 	jumps := api.button_input_press_count(input.keyboard[.Space])
-	if jumps > 0 {
+	if jumps > 0 || api.button_input_pressed(input.mouse.buttons[.Right]) {
 		state.t_jump = JUMP_DUR
 	}
 
@@ -99,6 +104,14 @@ handmade_game_render :: proc "contextless" (
 	state := get_game_state(memory)
 	render_gradient(fb, int(state.x_offset), int(state.y_offset))
 	render_player(fb, int(state.player_x), int(state.player_y))
+	render_square(
+		fb,
+		int(state.cursor_x),
+		int(state.cursor_y),
+		10,
+		10,
+		CURSOR_COLOR,
+	)
 }
 
 Pixel :: distinct u32
@@ -133,16 +146,32 @@ render_gradient :: proc(fb: api.Frame_Buffer, x_offset, y_offset: int) {
 PLAYER_WIDTH :: 10
 PLAYER_HEIGHT :: 10
 PLAYER_COLOR :: 0xFFFFFF00
+CURSOR_COLOR :: 0xFF00FF00
 
 render_player :: proc(fb: api.Frame_Buffer, player_x, player_y: int) {
-	for y_off in 0 ..< PLAYER_HEIGHT {
-		y := player_y + y_off
-		if y < 0 || int(fb.height) <= y do break
-		row := frame_buffer_row(fb, y)
-		for x_off in 0 ..< PLAYER_WIDTH {
-			x := player_x + x_off
-			if x < 0 || int(fb.width) <= x do break
-			row[x] = PLAYER_COLOR
+	render_square(
+		fb,
+		x = player_x,
+		y = player_y,
+		width = PLAYER_WIDTH,
+		height = PLAYER_HEIGHT,
+		color = PLAYER_COLOR,
+	)
+}
+
+render_square :: proc(
+	fb: api.Frame_Buffer,
+	x, y, width, height: int,
+	color: Pixel,
+) {
+	for y_off in 0 ..< height {
+		y_pos := y + y_off
+		if y_pos < 0 || int(fb.height) <= y_pos do break
+		row := frame_buffer_row(fb, y_pos)
+		for x_off in 0 ..< width {
+			x_pos := x + x_off
+			if x_pos < 0 || int(fb.width) <= x_pos do break
+			row[x_pos] = color
 		}
 	}
 }

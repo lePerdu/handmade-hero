@@ -5,6 +5,8 @@ import "core:c"
 import "core:dynlib"
 import "core:fmt"
 import "core:log"
+import "core:math"
+import "core:math/fixed"
 import "core:math/rand"
 import "core:mem"
 import "core:os"
@@ -268,12 +270,11 @@ game_loop :: proc(state: ^State) {
 			// TODO: Simulate at fixed DT? Would require running this potentially
 			// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
 			if now := get_perf_counter_wall_ns(); now >= next_update_time_ns {
-				// TODO: Don't create the Game_Input object every time
-				input := game_api.Input{state.display.keyboard_input}
+				input := state.display.game_input
 				dt_ns := now - last_update_time_ns
 				record_input_frame(&state.recorder, input, dt_ns)
 				state.game_symbols.update(state.game_memory, input, dt_ns)
-				game_api.keyboard_input_reset(&state.display.keyboard_input)
+				game_api.input_reset(&state.display.game_input)
 				last_update_time_ns = now
 			}
 		}
@@ -317,7 +318,7 @@ handle_engine_input :: proc(state: ^State) {
 		if state.paused {
 			state.paused = false
 			audio_resume(&state.audio)
-			game_api.keyboard_input_reset(&state.display.keyboard_input)
+			game_api.input_reset(&state.display.game_input)
 		} else {
 			state.paused = true
 			audio_pause(&state.audio)
@@ -434,7 +435,7 @@ playback_end :: proc(state: ^State) {
 	assert(state.recorder.state == .Playing)
 	log.infof("stop playback #{}", state.recorder.index)
 	state.recorder.state = .None
-	game_api.keyboard_input_reset(&state.display.keyboard_input)
+	game_api.input_reset(&state.display.game_input)
 }
 
 playback_peek_frame :: proc(state: ^State) -> Input_Frame {
@@ -684,11 +685,17 @@ Display_State :: struct {
 	// Index of the buffer which should be used to render the next frame
 	back_buffer_index: int,
 
-	// Input
+	// Keyboard
 	wl_keyboard: wayland.Wl_Keyboard,
-	keyboard_input: game_api.Keyboard_Input,
 	// Keys that are only used for the engine, not passed to the game code
 	engine_keyboard_input: [Engine_Key]game_api.Button_Input,
+
+	// Pointer
+	wl_pointer: wayland.Wl_Pointer,
+	pointer_cursor_configured: bool,
+
+	// Input events buffered since the last update.
+	game_input: game_api.Input,
 
 	// Frame state
 	frame_callback: wayland.Wl_Callback,
@@ -1044,6 +1051,51 @@ handle_event :: proc(
 			)
 			return nil
 		}
+	case state.wl_pointer:
+		switch opcode {
+		case wayland.WL_POINTER_ENTER_EVENT_OPCODE:
+			handle_pointer_enter(
+				state,
+				wayland.wl_pointer_enter_parse(&state.conn, message) or_return,
+			)
+			return nil
+		case wayland.WL_POINTER_LEAVE_EVENT_OPCODE:
+			handle_pointer_leave(
+				state,
+				wayland.wl_pointer_leave_parse(&state.conn, message) or_return,
+			)
+			return nil
+		case wayland.WL_POINTER_MOTION_EVENT_OPCODE:
+			handle_pointer_motion(
+				state,
+				wayland.wl_pointer_motion_parse(
+					&state.conn,
+					message,
+				) or_return,
+			)
+			return nil
+		case wayland.WL_POINTER_BUTTON_EVENT_OPCODE:
+			handle_pointer_button(
+				state,
+				wayland.wl_pointer_button_parse(
+					&state.conn,
+					message,
+				) or_return,
+			)
+			return nil
+		case wayland.WL_POINTER_AXIS_EVENT_OPCODE:
+			handle_pointer_axis(
+				state,
+				wayland.wl_pointer_axis_parse(&state.conn, message) or_return,
+			)
+			return nil
+		case wayland.WL_POINTER_FRAME_EVENT_OPCODE:
+			handle_pointer_frame(
+				state,
+				wayland.wl_pointer_frame_parse(&state.conn, message) or_return,
+			)
+			return nil
+		}
 	case state.wl_shm:
 		switch opcode {
 		case wayland.WL_SHM_FORMAT_EVENT_OPCODE:
@@ -1263,15 +1315,22 @@ handle_seat_capabilities :: proc(
 	state: ^Display_State,
 	event: wayland.Wl_Seat_Capabilities_Event,
 ) {
-	if .Keyboard not_in event.capabilities {
+	if .Keyboard in event.capabilities {
+		state.wl_keyboard, _ = wayland.wl_seat_get_keyboard(
+			&state.conn,
+			state.wl_seat,
+		)
+	} else {
 		log.error("wl_seat keyboard not available")
-		return
 	}
-
-	state.wl_keyboard, _ = wayland.wl_seat_get_keyboard(
-		&state.conn,
-		state.wl_seat,
-	)
+	if .Pointer in event.capabilities {
+		state.wl_pointer, _ = wayland.wl_seat_get_pointer(
+			&state.conn,
+			state.wl_seat,
+		)
+	} else {
+		log.error("wl_seat pointer not available")
+	}
 }
 
 // TODO: Pull these (and others) from linux EVDEV header
@@ -1374,7 +1433,7 @@ scancode_to_button :: proc(
 	bool,
 ) {
 	if k, ok := scancode_to_game_key(code); ok {
-		return &state.keyboard_input[k], true
+		return &state.game_input.keyboard[k], true
 	} else if k, ok := scancode_to_engine_key(code); ok {
 		return &state.engine_keyboard_input[k], true
 	} else {
@@ -1399,7 +1458,7 @@ handle_keyboard_leave :: proc(
 	event: wayland.Wl_Keyboard_Leave_Event,
 ) {
 	// Releasing all keys when un-focusing makes logic in `enter` easiest
-	for &key in state.keyboard_input {
+	for &key in state.game_input.keyboard {
 		game_api.button_input_update(&key, pressed = false)
 	}
 }
@@ -1418,6 +1477,91 @@ handle_keyboard_modifiers :: proc(
 	state: ^Display_State,
 	event: wayland.Wl_Keyboard_Modifiers_Event,
 ) {}
+
+setup_pointer_cursor :: proc(state: ^Display_State, event_serial: u32) {
+	if state.pointer_cursor_configured {
+		return
+	}
+	// Doesn't really matter if it fails
+	state.pointer_cursor_configured = true
+
+	// TODO: Error handling
+	_ = wayland.wl_pointer_set_cursor(
+		&state.conn,
+		state.wl_pointer,
+		event_serial,
+		wayland.OBJECT_ID_NIL,
+		hotspot_x = 0,
+		hotspot_y = 0,
+	)
+}
+
+handle_pointer_enter :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Pointer_Enter_Event,
+) {
+	setup_pointer_cursor(state, event.serial)
+}
+
+handle_pointer_leave :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Pointer_Leave_Event,
+) {
+}
+
+handle_pointer_motion :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Pointer_Motion_Event,
+) {
+	state.game_input.mouse.pos_x = f32(fixed.to_f64(event.surface_x))
+	state.game_input.mouse.pos_y = f32(fixed.to_f64(event.surface_y))
+}
+
+// From linux/input-event-codes.h
+BTN_LEFT :: 0x110
+BTN_RIGHT :: 0x111
+BTN_MIDDLE :: 0x112
+
+convert_pointer_button :: proc(button: u32) -> (game_api.Mouse_Button, bool) {
+	switch button {
+	case BTN_LEFT:
+		return .Left, true
+	case BTN_RIGHT:
+		return .Right, true
+	case BTN_MIDDLE:
+		return .Middle, true
+	case:
+		return nil, false
+	}
+}
+
+handle_pointer_button :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Pointer_Button_Event,
+) {
+	if btn, ok := convert_pointer_button(event.button); ok {
+		game_api.button_input_update(
+			&state.game_input.mouse.buttons[btn],
+			event.state == .Pressed,
+		)
+	} else {
+		log.debugf("unhandled pointer button: {}", event.button)
+	}
+}
+
+handle_pointer_axis :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Pointer_Axis_Event,
+) {
+	// TODO: Handle scroll wheel?
+}
+
+handle_pointer_frame :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Pointer_Frame_Event,
+) {
+	// TODO: Does this need to do anything, like buffer input events in a frame?
+}
 
 Shm_Error :: posix.Errno
 

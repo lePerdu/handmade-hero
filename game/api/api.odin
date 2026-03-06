@@ -53,6 +53,7 @@ dummy_render_audio :: proc "contextless" (
 
 Input :: struct {
 	keyboard: Keyboard_Input,
+	mouse: Mouse_Input,
 }
 
 Frame_Buffer :: struct {
@@ -94,6 +95,20 @@ Button_Input :: struct {
 
 Keyboard_Input :: [Key]Button_Input
 
+Mouse_Button :: enum {
+	Left,
+	Middle,
+	Right,
+}
+
+Mouse_Input :: struct {
+	// TODO: Store position at which button presses occur? Would require having
+	// a limited number of mouse events
+	buttons: [Mouse_Button]Button_Input,
+	pos_x: f32,
+	pos_y: f32,
+}
+
 button_input_press_count :: proc(button: Button_Input) -> u32 {
 	if button.end_pressed {
 		// 0->0
@@ -130,4 +145,15 @@ keyboard_input_reset :: proc(input: ^[$E]Button_Input) {
 	for &key in input {
 		key.transitions = 0
 	}
+}
+
+mouse_input_reset :: proc(input: ^Mouse_Input) {
+	for &b in input.buttons {
+		b.transitions = 0
+	}
+}
+
+input_reset :: proc(input: ^Input) {
+	keyboard_input_reset(&input.keyboard)
+	mouse_input_reset(&input.mouse)
 }
