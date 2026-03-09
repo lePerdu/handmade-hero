@@ -692,7 +692,6 @@ Display_State :: struct {
 
 	// Pointer
 	wl_pointer: wayland.Wl_Pointer,
-	pointer_cursor_configured: bool,
 
 	// Input events buffered since the last update.
 	game_input: game_api.Input,
@@ -1479,21 +1478,7 @@ handle_keyboard_modifiers :: proc(
 ) {}
 
 setup_pointer_cursor :: proc(state: ^Display_State, event_serial: u32) {
-	if state.pointer_cursor_configured {
-		return
-	}
-	// Doesn't really matter if it fails
-	state.pointer_cursor_configured = true
-
-	// TODO: Error handling
-	_ = wayland.wl_pointer_set_cursor(
-		&state.conn,
-		state.wl_pointer,
-		event_serial,
-		wayland.OBJECT_ID_NIL,
-		hotspot_x = 0,
-		hotspot_y = 0,
-	)
+	// TODO: Custom cursor? Hide Wayland's cursor and draw in game code?
 }
 
 handle_pointer_enter :: proc(
@@ -1655,6 +1640,7 @@ when ALSA_CONFIG.access_mode == .RW_INTERLEAVED {
 }
 
 Audio_State :: struct {
+	config: Alsa_Config,
 	pcm: alsa.Pcm,
 	buffer_size: alsa.Pcm_Uframes,
 	period_size: alsa.Pcm_Uframes,
