@@ -774,7 +774,7 @@ display_init :: proc(state: ^Display_State) -> bool {
 	)
 	_ = wayland.wl_surface_commit(&state.conn, state.wl_surface)
 
-	display_setup_buffers(state, 640, 480)
+	display_setup_buffers(state, 960, 540)
 
 	return true
 }

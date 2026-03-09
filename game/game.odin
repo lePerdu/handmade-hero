@@ -3,20 +3,13 @@ package game
 import "base:runtime"
 import "core:math"
 import "core:mem"
+import "core:slice"
 
 import "api"
 
 State :: struct {
 	// Relies on game memory being 0-initialized
 	initialized: bool,
-	x_offset, y_offset: f32,
-	play_sound: bool,
-	audio_vol: f32,
-	audio_phase: f32,
-	player_x: f32,
-	player_y: f32,
-	cursor_x, cursor_y: f32,
-	t_jump: f32,
 }
 
 get_game_context :: proc "contextless" (
@@ -38,8 +31,6 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	if !state.initialized {
 		state^ = {
 			initialized = true,
-			player_x = 100.0,
-			player_y = 100.0,
 		}
 	}
 	return state
@@ -53,46 +44,6 @@ handmade_game_update :: proc "contextless" (
 ) {
 	context = get_game_context(memory)
 	state := get_game_state(memory)
-
-	state.cursor_x = input.mouse.pos_x
-	state.cursor_y = input.mouse.pos_y
-	state.play_sound = input.mouse.buttons[.Left].end_pressed
-
-	rate: f32 : 40.0 // px/sec
-	x_rate: f32 = 0.0
-	y_rate: f32 = 0.0
-
-	// Use +=/-= so that pressing 2 directions at the same time cancels out
-	if input.keyboard[.W].end_pressed || input.keyboard[.UP].end_pressed {
-		y_rate -= rate
-	}
-	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed {
-		x_rate -= rate
-	}
-	if input.keyboard[.S].end_pressed || input.keyboard[.Down].end_pressed {
-		y_rate += rate
-	}
-	if input.keyboard[.D].end_pressed || input.keyboard[.Right].end_pressed {
-		x_rate += rate
-	}
-	// state.x_offset += f32(dt_ns) * x_rate / 1_000_000_000.0
-	// state.y_offset += f32(dt_ns) * y_rate / 1_000_000_000.0
-	// state.play_sound = input.keyboard[.Space].end_pressed
-
-	state.player_x += f32(dt_ns) * x_rate / 1_000_000_000.0
-	state.player_y += f32(dt_ns) * y_rate / 1_000_000_000.0
-
-	JUMP_DUR :: 1.5 // sec
-
-	jumps := api.button_input_press_count(input.keyboard[.Space])
-	if jumps > 0 || api.button_input_pressed(input.mouse.buttons[.Right]) {
-		state.t_jump = JUMP_DUR
-	}
-
-	if state.t_jump > 0 {
-		state.player_y += 10.0 * math.sin(math.TAU / JUMP_DUR * state.t_jump)
-		state.t_jump -= f32(dt_ns) / 1_000_000_000
-	}
 }
 
 @(export)
@@ -102,16 +53,9 @@ handmade_game_render :: proc "contextless" (
 ) {
 	context = get_game_context(memory)
 	state := get_game_state(memory)
-	render_gradient(fb, int(state.x_offset), int(state.y_offset))
-	render_player(fb, int(state.player_x), int(state.player_y))
-	render_square(
-		fb,
-		int(state.cursor_x),
-		int(state.cursor_y),
-		10,
-		10,
-		CURSOR_COLOR,
-	)
+
+	frame_buffer_fill(fb, 0x00FF00FF)
+	render_rect(fb, 100, 100, 50, 160, 0x0000FFFF)
 }
 
 Pixel :: distinct u32
@@ -129,55 +73,49 @@ frame_buffer_row :: proc(fb: api.Frame_Buffer, y: int) -> []Pixel {
 	)
 }
 
-render_gradient :: proc(fb: api.Frame_Buffer, x_offset, y_offset: int) {
+frame_buffer_px :: proc(fb: api.Frame_Buffer, x, y: int) -> ^Pixel {
+	assert(x >= 0)
+	assert(x < int(fb.width))
+	return &frame_buffer_row(fb, y)[x]
+}
+
+frame_buffer_get :: proc(fb: api.Frame_Buffer, x, y: int) -> Pixel {
+	return frame_buffer_px(fb, x, y)^
+}
+
+frame_buffer_set :: proc(fb: api.Frame_Buffer, x, y: int, p: Pixel) {
+	frame_buffer_px(fb, x, y)^ = p
+}
+
+frame_buffer_fill :: proc(fb: api.Frame_Buffer, p: Pixel) {
+	// TODO: Is it OK to to write over gaps in the stride?
 	for y in 0 ..< fb.height {
 		row := frame_buffer_row(fb, int(y))
-		for x in 0 ..< fb.width {
-			// TODO: Is casting to u8 the "proper" way to wrap?
-			row[x] = make_pixel(
-				0,
-				u8(int(y) + y_offset),
-				u8(int(x) + x_offset),
-			)
-		}
+		slice.fill(row, p)
 	}
 }
 
-PLAYER_WIDTH :: 10
-PLAYER_HEIGHT :: 10
-PLAYER_COLOR :: 0xFFFFFF00
-CURSOR_COLOR :: 0xFF00FF00
-
-render_player :: proc(fb: api.Frame_Buffer, player_x, player_y: int) {
-	render_square(
-		fb,
-		x = player_x,
-		y = player_y,
-		width = PLAYER_WIDTH,
-		height = PLAYER_HEIGHT,
-		color = PLAYER_COLOR,
-	)
+round_px :: #force_inline proc(v: f32) -> int {
+	return int(math.round(v))
 }
 
-render_square :: proc(
-	fb: api.Frame_Buffer,
-	x, y, width, height: int,
-	color: Pixel,
-) {
-	for y_off in 0 ..< height {
-		y_pos := y + y_off
-		if y_pos < 0 || int(fb.height) <= y_pos do break
-		row := frame_buffer_row(fb, y_pos)
-		for x_off in 0 ..< width {
-			x_pos := x + x_off
-			if x_pos < 0 || int(fb.width) <= x_pos do break
-			row[x_pos] = color
-		}
+round_clamp_px :: #force_inline proc(v: f32, #any_int fb_dim: int) -> int {
+	return clamp(round_px(v), 0, fb_dim)
+}
+
+render_rect :: proc(fb: api.Frame_Buffer, x, y, w, h: f32, color: Pixel) {
+	y_min := round_clamp_px(y, fb.height)
+	y_max := round_clamp_px(y + h, fb.height)
+
+	x_min := round_clamp_px(x, fb.width)
+	x_max := round_clamp_px(x + w, fb.width)
+
+	for y_px in y_min ..< y_max {
+		row := frame_buffer_row(fb, y_px)
+		row_part := row[x_min:x_max]
+		slice.fill(row_part, color)
 	}
 }
-
-VOLUME :: 0.2
-ATTACK_MS :: 50.0
 
 @(export)
 handmade_game_render_audio :: proc "contextless" (
@@ -188,44 +126,6 @@ handmade_game_render_audio :: proc "contextless" (
 	context = get_game_context(memory)
 	state := get_game_state(memory)
 
-	generate_sine(
-		timings,
-		buffer,
-		freq = 420.0,
-		amp = &state.audio_vol,
-		amp_target = state.play_sound ? VOLUME : 0.0,
-		phase = &state.audio_phase,
-	)
-}
-
-generate_sine :: proc(
-	timings: api.Audio_Timings,
-	frame_buf: []api.Audio_Frame,
-	freq: f32,
-	amp: ^f32,
-	amp_target: f32,
-	phase: ^f32,
-) {
-	dt := math.TAU / f32(timings.sample_rate) * freq
-	// amplitude increment for each sample in order to go from 0->VOLUME in
-	// ATTACK_MS
-	amp_inc := VOLUME / (ATTACK_MS / 1000.0) / f32(timings.sample_rate)
-
-	// TODO: Does not modifying the pointers in the loop actually matter?
-	t: f32 = phase^
-	cur_amp: f32 = amp^
-	for &frame, index in frame_buf {
-		if cur_amp <= amp_target {
-			cur_amp = min(cur_amp + amp_inc, amp_target)
-		} else {
-			cur_amp = max(cur_amp - amp_inc, amp_target)
-		}
-		sample_amp := f32(max(i16)) * cur_amp
-		sample := sample_amp * math.sin(t)
-		frame = {i16(sample), i16(sample)}
-		t += dt
-		if t > math.TAU do t -= math.TAU
-	}
-	phase^ = t
-	amp^ = cur_amp
+	// Silence
+	slice.fill(buffer, api.Audio_Frame{0, 0})
 }
