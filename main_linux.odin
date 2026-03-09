@@ -1355,7 +1355,7 @@ scancode_to_game_key :: proc(code: u32) -> (game_api.Key, bool) {
 	case KEY_D:
 		return .D, true
 	case KEY_UP:
-		return .UP, true
+		return .Up, true
 	case KEY_LEFT:
 		return .Left, true
 	case KEY_DOWN:

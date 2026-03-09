@@ -74,7 +74,7 @@ Key :: enum {
 	A,
 	S,
 	D,
-	UP,
+	Up,
 	Left,
 	Right,
 	Down,
