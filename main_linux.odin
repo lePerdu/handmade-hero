@@ -537,12 +537,12 @@ load_recording :: proc(
 	defer os.close(file)
 
 	total_size: i64
-	if total_size, err = os.file_size(file); err == nil {
+	if total_size, err = os.file_size(file); err != nil {
 		total_size = 0
 	}
 
 	if total_size < GAME_MEMORY_SIZE {
-		log.warn(
+		log.warnf(
 			LOG_PREFIX + "file too small: expected>={}, got={}",
 			GAME_MEMORY_SIZE,
 			total_size,
@@ -552,7 +552,7 @@ load_recording :: proc(
 
 	frames_size := total_size - GAME_MEMORY_SIZE
 	if frames_size % size_of(game_api.Input) != 0 {
-		log.warn(
+		log.warnf(
 			LOG_PREFIX +
 			"file size not aligned to input frames: total={} frames={}",
 			total_size,
