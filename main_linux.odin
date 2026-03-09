@@ -764,6 +764,11 @@ display_init :: proc(state: ^Display_State) -> bool {
 		state.xdg_toplevel,
 		"Handmade",
 	)
+	_ = wayland.xdg_toplevel_set_app_id(
+		&state.conn,
+		state.xdg_toplevel,
+		"lePerdu.handmade-hero",
+	)
 	_ = wayland.wl_surface_commit(&state.conn, state.wl_surface)
 
 	display_setup_buffers(state, 960, 540)
