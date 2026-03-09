@@ -48,16 +48,11 @@ Record_State :: enum {
 	Playing,
 }
 
-Input_Frame :: struct {
-	dt_ns: i64,
-	input: game_api.Input,
-}
-
 INIT_RECORDING_FRAME_COUNT :: 10 * 30
 
 Recording :: struct {
 	game_mem_snapshot: []byte,
-	frames: [dynamic]Input_Frame,
+	frames: [dynamic]game_api.Input,
 }
 
 GAME_MEMORY_SIZE :: 1 << 20
@@ -255,11 +250,7 @@ game_loop :: proc(state: ^State) {
 				next_update_time_ns = last_update_time_ns + input_frame.dt_ns
 				if now := get_perf_counter_wall_ns();
 				   now >= next_update_time_ns {
-					state.game_symbols.update(
-						state.game_memory,
-						input_frame.input,
-						input_frame.dt_ns,
-					)
+					state.game_symbols.update(state.game_memory, input_frame)
 					playback_advance_frame(state)
 					last_update_time_ns = now
 				} else {
@@ -270,11 +261,14 @@ game_loop :: proc(state: ^State) {
 			// TODO: Simulate at fixed DT? Would require running this potentially
 			// multiple times if the render loop takes longer than MIN_UPDATE_PERIOD_NS
 			if now := get_perf_counter_wall_ns(); now >= next_update_time_ns {
-				input := state.display.game_input
-				dt_ns := now - last_update_time_ns
-				record_input_frame(&state.recorder, input, dt_ns)
-				state.game_symbols.update(state.game_memory, input, dt_ns)
-				game_api.input_reset(&state.display.game_input)
+				input := game_api.Input {
+					dt_ns = now - last_update_time_ns,
+					keyboard = state.display.keyboard_input,
+					mouse = state.display.mouse_input,
+				}
+				record_input_frame(&state.recorder, input)
+				state.game_symbols.update(state.game_memory, input)
+				reset_game_input(state)
 				last_update_time_ns = now
 			}
 		}
@@ -306,6 +300,11 @@ game_loop :: proc(state: ^State) {
 	}
 }
 
+reset_game_input :: proc(state: ^State) {
+	game_api.keyboard_input_reset(&state.display.keyboard_input)
+	game_api.mouse_input_reset(&state.display.mouse_input)
+}
+
 handle_engine_input :: proc(state: ^State) {
 	// Handle engine control inputs
 	if game_api.button_input_pressed(
@@ -318,7 +317,7 @@ handle_engine_input :: proc(state: ^State) {
 		if state.paused {
 			state.paused = false
 			audio_resume(&state.audio)
-			game_api.input_reset(&state.display.game_input)
+			reset_game_input(state)
 		} else {
 			state.paused = true
 			audio_pause(&state.audio)
@@ -365,17 +364,9 @@ record_select_index :: proc(state: ^State, index: int) {
 	}
 }
 
-record_input_frame :: proc(
-	recorder: ^Recorder,
-	input: game_api.Input,
-	dt_ns: i64,
-) {
+record_input_frame :: proc(recorder: ^Recorder, input: game_api.Input) {
 	if recorder.state != .Recording do return
-
-	_, err := append(
-		&recorder.recordings[recorder.index].frames,
-		Input_Frame{dt_ns, input},
-	)
+	_, err := append(&recorder.recordings[recorder.index].frames, input)
 	assert(err == nil)
 }
 
@@ -388,7 +379,7 @@ record_begin :: proc(state: ^State, index: int) {
 	recording_destroy(rec)
 	rec^ = {
 		game_mem_snapshot = slice.clone(state.game_memory.persistent),
-		frames = make([dynamic]Input_Frame, 0, INIT_RECORDING_FRAME_COUNT),
+		frames = make([dynamic]game_api.Input, 0, INIT_RECORDING_FRAME_COUNT),
 	}
 }
 
@@ -435,10 +426,10 @@ playback_end :: proc(state: ^State) {
 	assert(state.recorder.state == .Playing)
 	log.infof("stop playback #{}", state.recorder.index)
 	state.recorder.state = .None
-	game_api.input_reset(&state.display.game_input)
+	reset_game_input(state)
 }
 
-playback_peek_frame :: proc(state: ^State) -> Input_Frame {
+playback_peek_frame :: proc(state: ^State) -> game_api.Input {
 	recorder := &state.recorder
 	assert(recorder.state == .Playing)
 	rec := recorder.recordings[recorder.index]
@@ -560,7 +551,7 @@ load_recording :: proc(
 	}
 
 	frames_size := total_size - GAME_MEMORY_SIZE
-	if frames_size % size_of(Input_Frame) != 0 {
+	if frames_size % size_of(game_api.Input) != 0 {
 		log.warn(
 			LOG_PREFIX +
 			"file size not aligned to input frames: total={} frames={}",
@@ -569,10 +560,10 @@ load_recording :: proc(
 		)
 		return
 	}
-	frames_len := int(frames_size / size_of(Input_Frame))
+	frames_len := int(frames_size / size_of(game_api.Input))
 
 	rec.game_mem_snapshot = make([]byte, GAME_MEMORY_SIZE)
-	rec.frames = make([dynamic]Input_Frame, frames_len)
+	rec.frames = make([dynamic]game_api.Input, frames_len)
 	// These should be freed on failure to avoid leaking memory
 
 	if _, err = os.read(file, rec.game_mem_snapshot); err != nil {
@@ -694,7 +685,8 @@ Display_State :: struct {
 	wl_pointer: wayland.Wl_Pointer,
 
 	// Input events buffered since the last update.
-	game_input: game_api.Input,
+	keyboard_input: game_api.Keyboard_Input,
+	mouse_input: game_api.Mouse_Input,
 
 	// Frame state
 	frame_callback: wayland.Wl_Callback,
@@ -1432,7 +1424,7 @@ scancode_to_button :: proc(
 	bool,
 ) {
 	if k, ok := scancode_to_game_key(code); ok {
-		return &state.game_input.keyboard[k], true
+		return &state.keyboard_input[k], true
 	} else if k, ok := scancode_to_engine_key(code); ok {
 		return &state.engine_keyboard_input[k], true
 	} else {
@@ -1457,7 +1449,7 @@ handle_keyboard_leave :: proc(
 	event: wayland.Wl_Keyboard_Leave_Event,
 ) {
 	// Releasing all keys when un-focusing makes logic in `enter` easiest
-	for &key in state.game_input.keyboard {
+	for &key in state.keyboard_input {
 		game_api.button_input_update(&key, pressed = false)
 	}
 }
@@ -1498,8 +1490,8 @@ handle_pointer_motion :: proc(
 	state: ^Display_State,
 	event: wayland.Wl_Pointer_Motion_Event,
 ) {
-	state.game_input.mouse.pos_x = f32(fixed.to_f64(event.surface_x))
-	state.game_input.mouse.pos_y = f32(fixed.to_f64(event.surface_y))
+	state.mouse_input.pos_x = f32(fixed.to_f64(event.surface_x))
+	state.mouse_input.pos_y = f32(fixed.to_f64(event.surface_y))
 }
 
 // From linux/input-event-codes.h
@@ -1526,7 +1518,7 @@ handle_pointer_button :: proc(
 ) {
 	if btn, ok := convert_pointer_button(event.button); ok {
 		game_api.button_input_update(
-			&state.game_input.mouse.buttons[btn],
+			&state.mouse_input.buttons[btn],
 			event.state == .Pressed,
 		)
 	} else {

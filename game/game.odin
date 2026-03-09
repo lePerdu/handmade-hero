@@ -40,7 +40,6 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 handmade_game_update :: proc "contextless" (
 	memory: api.Memory,
 	input: api.Input,
-	dt_ns: i64,
 ) {
 	context = get_game_context(memory)
 	state := get_game_state(memory)
@@ -128,4 +127,11 @@ handmade_game_render_audio :: proc "contextless" (
 
 	// Silence
 	slice.fill(buffer, api.Audio_Frame{0, 0})
+}
+
+// Try to construct the symbol table to make sure the types are correct
+typecheck_symbol_table :: api.Symbol_Table {
+	update = handmade_game_update,
+	render = handmade_game_render,
+	render_audio = handmade_game_render_audio,
 }

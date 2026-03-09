@@ -13,11 +13,7 @@ Memory :: struct {
 
 // TODO: Can these use the odin calling convention even when coming from a
 // shared library?
-Update_Proc :: #type proc "contextless" (
-	memory: Memory,
-	input: Input,
-	dt_ns: i64,
-)
+Update_Proc :: #type proc "contextless" (memory: Memory, input: Input)
 Render_Proc :: #type proc "contextless" (memory: Memory, fb: Frame_Buffer)
 Render_Audio_Proc :: #type proc "contextless" (
 	memory: Memory,
@@ -39,11 +35,7 @@ dummy_symbol_table := Symbol_Table {
 	render_audio = dummy_render_audio,
 }
 
-dummy_update :: proc "contextless" (
-	memory: Memory,
-	input: Input,
-	dt_ns: i64,
-) {}
+dummy_update :: proc "contextless" (memory: Memory, input: Input) {}
 dummy_render :: proc "contextless" (memory: Memory, fb: Frame_Buffer) {}
 dummy_render_audio :: proc "contextless" (
 	memory: Memory,
@@ -52,6 +44,7 @@ dummy_render_audio :: proc "contextless" (
 ) {}
 
 Input :: struct {
+	dt_ns: i64,
 	keyboard: Keyboard_Input,
 	mouse: Mouse_Input,
 }
@@ -151,9 +144,4 @@ mouse_input_reset :: proc(input: ^Mouse_Input) {
 	for &b in input.buttons {
 		b.transitions = 0
 	}
-}
-
-input_reset :: proc(input: ^Input) {
-	keyboard_input_reset(&input.keyboard)
-	mouse_input_reset(&input.mouse)
 }
