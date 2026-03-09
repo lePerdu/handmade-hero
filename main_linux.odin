@@ -1628,11 +1628,37 @@ destroy_shm_mapping :: proc(shm_fd: posix.FD, shm_buf: []byte) {
 
 import "vendor/alsa"
 
+Alsa_Config :: struct {
+	device: cstring,
+	access_mode: alsa.Pcm_Access,
+}
+
+PULSEAUDIO_CONFIG :: Alsa_Config {
+	device = "pulse",
+	access_mode = .RW_INTERLEAVED,
+}
+
+DEFAULT_MMAP_CONFIG :: Alsa_Config {
+	device = "default",
+	access_mode = .MMAP_INTERLEAVED,
+}
+
+// Using "default" or "pipewire" leads to buzzing sound and blocks system
+// audio while paused in the debugger. Pulse audio forces using
+// RW_INTERLEAVED, but that's alright for now
+ALSA_CONFIG :: PULSEAUDIO_CONFIG
+
+when ALSA_CONFIG.access_mode == .RW_INTERLEAVED {
+	_Audio_Buffer_Field :: []game_api.Audio_Frame
+} else {
+	_Audio_Buffer_Field :: struct {}
+}
+
 Audio_State :: struct {
 	pcm: alsa.Pcm,
 	buffer_size: alsa.Pcm_Uframes,
 	period_size: alsa.Pcm_Uframes,
-	buffer: []game_api.Audio_Frame,
+	buffer: _Audio_Buffer_Field,
 	sample_rate: uint,
 	supports_pause: bool,
 }
@@ -1643,11 +1669,12 @@ Audio_Error :: enum {
 }
 
 audio_init :: proc(state: ^Audio_State) -> Audio_Error {
-	// Using "default" or "pipewire" leads to buzzing sound and blocks system
-	// audio while paused in the debugger. Pulse audio also forces using
-	// MMAP_INTERLEAVED, but that's alright for now
-	if err := alsa.pcm_open(&state.pcm, "pulse", .Playback, .Nonblock);
-	   err != 0 {
+	if err := alsa.pcm_open(
+		&state.pcm,
+		ALSA_CONFIG.device,
+		.Playback,
+		.Nonblock,
+	); err != 0 {
 		log.error("failed to open audio device:", alsa.strerror(err))
 		return .Failed
 	}
@@ -1674,7 +1701,7 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 	if err := alsa.pcm_hw_params_set_access(
 		state.pcm,
 		hw_params,
-		.RW_INTERLEAVED,
+		ALSA_CONFIG.access_mode,
 	); err != 0 {
 		log.error("audio: failed to set access mode:", alsa.strerror(err))
 		return .Failed
@@ -1777,7 +1804,9 @@ audio_init :: proc(state: ^Audio_State) -> Audio_Error {
 		return .Failed
 	}
 
-	state.buffer = make([]game_api.Audio_Frame, state.buffer_size)
+	when ALSA_CONFIG.access_mode == .RW_INTERLEAVED {
+		state.buffer = make([]game_api.Audio_Frame, state.buffer_size)
+	}
 
 	log.infof(
 		"audio device config: buffer_size={} period_size={}",
@@ -1854,6 +1883,7 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 			need_start = true
 		}
 
+		// TODO: Repeat just this section if possible to avoid re-checking status?
 		avail: alsa.Pcm_Sframes
 		delay: alsa.Pcm_Sframes
 		if err := alsa.pcm_avail_delay(audio.pcm, &avail, &delay); err != 0 {
@@ -1874,78 +1904,74 @@ audio_fill_buffer :: proc(state: ^State) -> Audio_Error {
 		delay_ns := i64(delay) * 1_000_000_000 / i64(audio.sample_rate)
 		write_timestamp_ns := get_perf_counter_wall_ns() + delay_ns
 
-		// Supposedly faster version that doesn't return delay
-		// avail := alsa.pcm_avail_update(audio.pcm)
-		// if avail < 0 {
-		// 	if err := alsa.pcm_recover(audio.pcm, c.int(avail), alsa.PCM_RECOVER_VERBOSE);
-		// 	   err != 0 {
-		// 		log.error(
-		// 			"failed to update available space: failed to recover:",
-		// 			alsa.strerror(err),
-		// 		)
-		// 		return .Failed
-		// 	}
-		// 	continue
-		// }
-
 		log.debugf("audio state: delay={}frames avail={}frames", delay, avail)
 		if avail == 0 {
 			return nil
 		}
 
-		buf := audio.buffer[:avail]
-
 		timings := game_api.Audio_Timings {
 			write_timestamp_ns = write_timestamp_ns,
 			sample_rate = audio.sample_rate,
 		}
-		state.game_symbols.render_audio(state.game_memory, timings, buf)
 
-		// Should always return avail since we just asked how much space there
-		// is
-		if res := alsa.pcm_writei(
-			audio.pcm,
-			raw_data(buf),
-			alsa.Pcm_Uframes(avail),
-		); res < 0 {
-			log.error("failed to write samples:", alsa.strerror(i32(res)))
-			return .Failed
-		} else if res != avail {
-			log.warnf("write too few samples: expected={} got={}", avail, res)
+		when ALSA_CONFIG.access_mode == .RW_INTERLEAVED {
+			frame_buf := audio.buffer[:avail]
+			state.game_symbols.render_audio(
+				state.game_memory,
+				timings,
+				frame_buf,
+			)
+
+			// Should always return avail since we just asked how much space
+			// there is
+			if res := alsa.pcm_writei(
+				audio.pcm,
+				raw_data(frame_buf),
+				alsa.Pcm_Uframes(avail),
+			); res < 0 {
+				log.error("failed to write samples:", alsa.strerror(i32(res)))
+				return .Failed
+			} else if res != avail {
+				log.warnf(
+					"write too few samples: expected={} got={}",
+					avail,
+					res,
+				)
+			}
+		} else {
+			area: [^]alsa.Pcm_Channel_Area // Multi-pointer for the API
+			offset: alsa.Pcm_Uframes
+			space := alsa.Pcm_Uframes(avail)
+			if err := alsa.pcm_mmap_begin(audio.pcm, &area, &offset, &space);
+			   err != 0 {
+				log.error("failed to lock mmap area:", alsa.strerror(err))
+				return .Failed
+			}
+
+			frame_buf, ok := get_audio_buffer(
+				audio.buffer_size,
+				area,
+				offset,
+				space,
+			)
+			if !ok do return .Failed
+
+			state.game_symbols.render_audio(
+				state.game_memory,
+				timings,
+				frame_buf,
+			)
+
+			if err := alsa.pcm_mmap_commit(audio.pcm, offset, space); err < 0 {
+				log.error(
+					"failed to commit mmap area:",
+					alsa.strerror(i32(err)),
+				)
+				return .Failed
+			} else if alsa.Pcm_Uframes(err) != space {
+				log.warnf("short commit: expected={} got={}", space, err)
+			}
 		}
-
-		/* MMAP_INTERLEAVED access mode
-		// TODO: Repeat just this section if possible to avoid re-checking status?
-		area: [^]alsa.Pcm_Channel_Area // Multi-pointer for the API
-		offset: alsa.Pcm_Uframes
-		space := alsa.Pcm_Uframes(avail)
-		if err := alsa.pcm_mmap_begin(audio.pcm, &area, &offset, &space);
-		   err != 0 {
-			log.error("failed to lock mmap area:", alsa.strerror(err))
-			return .Failed
-		}
-
-		frame_buf, ok := get_audio_buffer(
-			audio.buffer_size,
-			area,
-			offset,
-			space,
-		)
-		if !ok do return .Failed
-
-		timings := game_api.Audio_Timings {
-			write_timestamp_ns = write_timestamp_ns,
-			sample_rate = audio.sample_rate,
-		}
-		state.game_symbols.render_audio(state.game_memory, timings, frame_buf)
-
-		if err := alsa.pcm_mmap_commit(audio.pcm, offset, space); err < 0 {
-			log.error("failed to commit mmap area:", alsa.strerror(i32(err)))
-			return .Failed
-		} else if alsa.Pcm_Uframes(err) != space {
-			log.warnf("short commit: expected={} got={}", space, err)
-		}
-		*/
 
 		// Start after putting something in the buffer
 		if need_start {
