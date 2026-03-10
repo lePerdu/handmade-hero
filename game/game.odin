@@ -1,7 +1,6 @@
 package game
 
 import "base:runtime"
-import "core:container/intrusive/list"
 import "core:math"
 import "core:mem"
 import "core:slice"
@@ -13,8 +12,8 @@ Frame_Buffer :: api.Frame_Buffer
 State :: struct {
 	// Relies on game memory being 0-initialized
 	initialized: bool,
-	player_x: f32,
-	player_y: f32,
+	world: World_Map,
+	player_coord: World_Coord,
 }
 
 get_game_context :: proc "contextless" (
@@ -36,9 +35,13 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	if !state.initialized {
 		state^ = {
 			initialized = true,
-			// TODO: Initialize later, once the tile map is known?
-			player_x = 8,
-			player_y = 5,
+			world = make_static_world_map(&global_tiles),
+			player_coord = {
+				tile_x = 0,
+				tile_y = 0,
+				local_x = f32(TILE_MAP_WIDTH) / 2,
+				local_y = f32(TILE_MAP_HEIGHT) / 2,
+			},
 		}
 	}
 	return state
@@ -55,7 +58,7 @@ handmade_game_update :: proc "contextless" (
 	// Sign of the movement: -1, 0, +1
 	player_dir_x, player_dir_y: f32
 	// tiles / sec
-	player_rate: f32 = 1e-9 * f32(input.dt_ns)
+	player_rate: f32 = 2e-9 * f32(input.dt_ns)
 
 	if input.keyboard[.W].end_pressed || input.keyboard[.Up].end_pressed {
 		player_dir_y -= 1
@@ -76,36 +79,71 @@ handmade_game_update :: proc "contextless" (
 		player_movement *= math.sqrt(f32(0.5))
 	}
 
-	// TODO: Actually look up position
-	cur_tile := WORLD_MAP.tile_maps[0]
+	new_coord := state.player_coord
+	new_coord.local_x += player_dir_x * player_movement
+	new_coord.local_y += player_dir_y * player_movement
 
-	new_x := state.player_x + player_dir_x * player_movement
-	new_y := state.player_y + player_dir_y * player_movement
-
-	if can_move_in_tile_map(cur_tile, new_x, new_y) &&
-	   can_move_in_tile_map(cur_tile, new_x - PLAYER_WIDTH_TILES / 2, new_y) &&
-	   can_move_in_tile_map(cur_tile, new_x + PLAYER_WIDTH_TILES / 2, new_y) &&
-	   can_move_in_tile_map(
-		   cur_tile,
-		   new_x,
-		   new_y - PLAYER_COLLISION_HEIGHT_TILES,
+	if can_move_in_world(
+		   state.world,
+		   offset_coord(new_coord, -PLAYER_WIDTH / 2, 0),
+	   ) &&
+	   can_move_in_world(
+		   state.world,
+		   offset_coord(new_coord, PLAYER_WIDTH / 2, 0),
+	   ) &&
+	   can_move_in_world(
+		   state.world,
+		   offset_coord(new_coord, 0, -PLAYER_COLLISION_HEIGHT_TILES),
 	   ) {
-		state.player_x = new_x
-		state.player_y = new_y
+		state.player_coord = normalize_coord(new_coord)
 	}
+}
+
+World_Coord :: struct {
+	// Offset of the current tile map (in tile-sized chunks)
+	// TODO: Rename?
+	tile_x, tile_y: i32,
+	// Offset within the tile map
+	local_x, local_y: f32,
+}
+
+normalize_coord :: proc(coord: World_Coord) -> World_Coord {
+	tile_shift_x := math.floor(coord.local_x / TILE_MAP_WIDTH)
+	tile_shift_y := math.floor(coord.local_y / TILE_MAP_HEIGHT)
+	return {
+		tile_x = coord.tile_x + i32(tile_shift_x),
+		tile_y = coord.tile_y + i32(tile_shift_y),
+		local_x = coord.local_x - tile_shift_x * TILE_MAP_WIDTH,
+		local_y = coord.local_y - tile_shift_y * TILE_MAP_HEIGHT,
+	}
+}
+
+coord_is_normalized :: proc(coord: World_Coord) -> bool {
+	return(
+		0 <= coord.local_x &&
+		coord.local_x < TILE_MAP_WIDTH &&
+		0 <= coord.local_y &&
+		coord.local_y < TILE_MAP_HEIGHT \
+	)
+}
+
+offset_coord :: proc(coord: World_Coord, x, y: f32) -> World_Coord {
+	coord := coord
+	coord.local_x += x
+	coord.local_y += y
+	return coord
 }
 
 Tile :: u8
 
+// TODO: Does tile map size ever need to be dynamic?
 Tile_Map :: struct {
-	// TODO: Smaller int size?
-	rows, cols: int,
 	// TODO: Store custom stride to allow taking subset views?
 	// Tiles, stored in row-major order
-	tiles: [^]Tile,
+	tiles: ^[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile,
 }
 
-Tile_Row :: []Tile
+Tile_Row :: ^[TILE_MAP_WIDTH]Tile
 
 tile_map_get_row :: proc(
 	tile_map: Tile_Map,
@@ -114,10 +152,7 @@ tile_map_get_row :: proc(
 	Tile_Row,
 	bool,
 ) {
-	if y_offset < 0 || tile_map.rows <= y_offset {
-		return nil, false
-	}
-	return tile_map.tiles[y_offset * tile_map.cols:][:tile_map.cols], true
+	return slice.get_ptr(tile_map.tiles[:], y_offset)
 }
 
 tile_row_get_ptr :: proc(tile_row: Tile_Row, x_offset: int) -> (^Tile, bool) {
@@ -195,8 +230,10 @@ can_move_in_tile_map :: proc(tile_map: Tile_Map, x, y: f32) -> bool {
 	return ok && tile == 0
 }
 
-make_static_tile_map :: proc "contextless" (tiles: ^[$N][$M]Tile) -> Tile_Map {
-	return {rows = N, cols = M, tiles = ([^]Tile)(tiles)}
+make_static_tile_map :: proc "contextless" (
+	tiles: ^[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile,
+) -> Tile_Map {
+	return {tiles}
 }
 
 // TODO: Move tile size / tile map size here?
@@ -206,42 +243,55 @@ World_Map :: struct {
 	tile_maps: [^]Tile_Map,
 }
 
-world_resolve_tile_map :: proc(
-	world: World_Map,
-	x, y: f32,
-) -> (
+World_Tile :: struct {
+	x_offset, y_offset: f32,
 	tile_map: ^Tile_Map,
-	local_x, local_y: f32,
+}
+
+world_get_tile :: proc(
+	world: World_Map,
+	tile_x, tile_y: i32,
+) -> (
+	tile: World_Tile,
 	ok: bool,
 ) {
-	// TODO: Make sure these work with negative coordinates?
-	tile_x := int(x / TILE_MAP_WIDTH)
-	tile_y := int(y / TILE_MAP_HEIGHT)
 
 	if tile_y < 0 ||
-	   world.rows <= tile_y ||
+	   world.rows <= int(tile_y) ||
 	   tile_x < 0 ||
-	   world.cols <= tile_x {
+	   world.cols <= int(tile_x) {
 		return
 	}
 
-	tile_map = &world.tile_maps[tile_y * world.cols + tile_x]
-	local_x = math.mod(x, TILE_MAP_WIDTH)
-	local_y = math.mod(y, TILE_MAP_HEIGHT)
-	ok = true
-	return
+	return {
+			x_offset = f32(tile_x) * TILE_MAP_WIDTH,
+			y_offset = f32(tile_y) * TILE_MAP_HEIGHT,
+			tile_map = &world.tile_maps[int(tile_y) * world.cols + int(tile_x)],
+		},
+		true
+}
+
+can_move_in_world_norm :: proc(
+	world: World_Map,
+	norm_coord: World_Coord,
+) -> bool {
+	assert(coord_is_normalized(norm_coord))
+	tile, ok := world_get_tile(world, norm_coord.tile_x, norm_coord.tile_y)
+	if !ok do return false
+	return can_move_in_tile_map(
+		tile.tile_map^,
+		norm_coord.local_x,
+		norm_coord.local_y,
+	)
+}
+
+can_move_in_world :: proc(world: World_Map, coord: World_Coord) -> bool {
+	return can_move_in_world_norm(world, normalize_coord(coord))
 }
 
 make_static_world_map :: proc "contextless" (
 	tile_maps: ^[$N][$M]Tile_Map,
 ) -> World_Map {
-	// TODO: Allow heterogenous tile maps?
-	for y in 0 ..< N {
-		for x in 0 ..< M {
-			assert_contextless(tile_maps[y][x].cols == TILE_MAP_WIDTH)
-			assert_contextless(tile_maps[y][x].rows == TILE_MAP_HEIGHT)
-		}
-	}
 	return {rows = N, cols = M, tile_maps = ([^]Tile_Map)(tile_maps)}
 }
 
@@ -309,10 +359,6 @@ global_tiles := [2][2]Tile_Map {
 	{TILE_MAP10, TILE_MAP11},
 }
 
-// TODO: This leads to a compiler error if `global_tiles` is inlined. Make a
-// minimal reproduction and report the error
-WORLD_MAP := make_static_world_map(&global_tiles)
-
 TILE_MAP_WIDTH :: 17
 TILE_MAP_HEIGHT :: 9
 
@@ -321,8 +367,8 @@ TILE_X_OFFSET: f32 : TILE_WIDTH / -2
 TILE_HEIGHT: f32 : 60
 TILE_Y_OFFSET: f32 : 0
 
-PLAYER_WIDTH_TILES: f32 : 0.6
-PLAYER_HEIGHT_TILES: f32 : 0.75
+PLAYER_WIDTH: f32 : 0.6
+PLAYER_HEIGHT: f32 : 0.75
 PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.25
 
 @(export)
@@ -335,10 +381,19 @@ handmade_game_render :: proc "contextless" (
 
 	frame_buffer_fill(fb, make_pixel(0xFF00FF))
 
-	cur_tile := WORLD_MAP.tile_maps[0]
+	assert(coord_is_normalized(state.player_coord))
+	cur_tile, ok := world_get_tile(
+		state.world,
+		state.player_coord.tile_x,
+		state.player_coord.tile_y,
+	)
+	if !ok {
+		// TODO: ???
+		panic("player out of bounds!")
+	}
 
 	row_iter: Tile_Map_Row_Iter
-	for row, row_offset in tile_map_next_row(cur_tile, &row_iter) {
+	for row, row_offset in tile_map_next_row(cur_tile.tile_map^, &row_iter) {
 		col_iter: Tile_Row_Col_Iter
 		for col, col_offset in tile_row_next_col(row, &col_iter) {
 			color: Color
@@ -347,25 +402,23 @@ handmade_game_render :: proc "contextless" (
 			} else {
 				color = make_color_grey(0.8)
 			}
-			render_rect(
+			render_rect_tile(
 				fb,
-				x = f32(col_offset) * TILE_WIDTH + TILE_X_OFFSET,
-				y = f32(row_offset) * TILE_HEIGHT + TILE_Y_OFFSET,
-				w = TILE_WIDTH,
-				h = TILE_HEIGHT,
+				x = f32(col_offset),
+				y = f32(row_offset),
+				w = 1,
+				h = 1,
 				color = color,
 			)
 		}
 	}
 
-	render_rect(
+	render_rect_tile(
 		fb,
-		x = (state.player_x - PLAYER_WIDTH_TILES / 2.0) * TILE_WIDTH +
-		TILE_X_OFFSET,
-		y = (state.player_y - PLAYER_HEIGHT_TILES) * TILE_HEIGHT +
-		TILE_Y_OFFSET,
-		w = PLAYER_WIDTH_TILES * TILE_WIDTH,
-		h = PLAYER_HEIGHT_TILES * TILE_HEIGHT,
+		x = state.player_coord.local_x - PLAYER_WIDTH / 2.0,
+		y = state.player_coord.local_y - PLAYER_HEIGHT,
+		w = PLAYER_WIDTH,
+		h = PLAYER_HEIGHT,
 		color = {r = 0.8, g = 0.1, b = 0.1},
 	)
 }
@@ -474,6 +527,17 @@ render_rect :: proc(fb: Frame_Buffer, x, y, w, h: f32, color: Color) {
 		row_part := row[x_min:x_max]
 		slice.fill(row_part, pixel)
 	}
+}
+
+render_rect_tile :: proc(fb: Frame_Buffer, x, y, w, h: f32, color: Color) {
+	render_rect(
+		fb,
+		x = x * TILE_WIDTH + TILE_X_OFFSET,
+		y = y * TILE_HEIGHT + TILE_Y_OFFSET,
+		w = w * TILE_WIDTH,
+		h = h * TILE_HEIGHT,
+		color = color,
+	)
 }
 
 @(export)
