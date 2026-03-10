@@ -82,7 +82,14 @@ handmade_game_update :: proc "contextless" (
 	new_x := state.player_x + player_dir_x * player_movement
 	new_y := state.player_y + player_dir_y * player_movement
 
-	if can_move_in_tile_map(cur_tile, new_x, new_y) {
+	if can_move_in_tile_map(cur_tile, new_x, new_y) &&
+	   can_move_in_tile_map(cur_tile, new_x - PLAYER_WIDTH_TILES / 2, new_y) &&
+	   can_move_in_tile_map(cur_tile, new_x + PLAYER_WIDTH_TILES / 2, new_y) &&
+	   can_move_in_tile_map(
+		   cur_tile,
+		   new_x,
+		   new_y - PLAYER_COLLISION_HEIGHT_TILES,
+	   ) {
 		state.player_x = new_x
 		state.player_y = new_y
 	}
@@ -314,6 +321,10 @@ TILE_X_OFFSET: f32 : TILE_WIDTH / -2
 TILE_HEIGHT: f32 : 60
 TILE_Y_OFFSET: f32 : 0
 
+PLAYER_WIDTH_TILES: f32 : 0.6
+PLAYER_HEIGHT_TILES: f32 : 0.75
+PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.25
+
 @(export)
 handmade_game_render :: proc "contextless" (
 	memory: api.Memory,
@@ -347,15 +358,14 @@ handmade_game_render :: proc "contextless" (
 		}
 	}
 
-	player_width := 0.6 * TILE_WIDTH
-	player_height := 0.75 * TILE_HEIGHT
-
 	render_rect(
 		fb,
-		x = state.player_x * TILE_WIDTH + TILE_X_OFFSET - player_width / 2.0,
-		y = state.player_y * TILE_HEIGHT + TILE_Y_OFFSET - player_height,
-		w = player_width,
-		h = player_height,
+		x = (state.player_x - PLAYER_WIDTH_TILES / 2.0) * TILE_WIDTH +
+		TILE_X_OFFSET,
+		y = (state.player_y - PLAYER_HEIGHT_TILES) * TILE_HEIGHT +
+		TILE_Y_OFFSET,
+		w = PLAYER_WIDTH_TILES * TILE_WIDTH,
+		h = PLAYER_HEIGHT_TILES * TILE_HEIGHT,
 		color = {r = 0.8, g = 0.1, b = 0.1},
 	)
 }
