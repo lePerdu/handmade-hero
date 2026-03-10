@@ -1,11 +1,14 @@
 package game
 
 import "base:runtime"
+import "core:container/intrusive/list"
 import "core:math"
 import "core:mem"
 import "core:slice"
 
 import "api"
+
+Frame_Buffer :: api.Frame_Buffer
 
 State :: struct {
 	// Relies on game memory being 0-initialized
@@ -33,8 +36,9 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	if !state.initialized {
 		state^ = {
 			initialized = true,
-			player_x = 100,
-			player_y = 100,
+			// TODO: Initialize later, once the tile map is known?
+			player_x = 8,
+			player_y = 5,
 		}
 	}
 	return state
@@ -50,7 +54,8 @@ handmade_game_update :: proc "contextless" (
 
 	// Sign of the movement: -1, 0, +1
 	player_dir_x, player_dir_y: f32
-	player_rate: f32 = 120e-9 * f32(input.dt_ns)
+	// tiles / sec
+	player_rate: f32 = 1e-9 * f32(input.dt_ns)
 
 	if input.keyboard[.W].end_pressed || input.keyboard[.Up].end_pressed {
 		player_dir_y -= 1
@@ -71,63 +76,284 @@ handmade_game_update :: proc "contextless" (
 		player_movement *= math.sqrt(f32(0.5))
 	}
 
-	state.player_x += player_dir_x * player_movement
-	state.player_y += player_dir_y * player_movement
+	// TODO: Actually look up position
+	cur_tile := WORLD_MAP.tile_maps[0]
+
+	new_x := state.player_x + player_dir_x * player_movement
+	new_y := state.player_y + player_dir_y * player_movement
+
+	if can_move_in_tile_map(cur_tile, new_x, new_y) {
+		state.player_x = new_x
+		state.player_y = new_y
+	}
 }
 
-TILE_MAP := [9][17]u8 {
-	{1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
-	{1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1},
-	{1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1},
-	{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1},
-	{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0},
-	{1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1},
-	{1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1},
-	{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
-	{1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
+Tile :: u8
+
+Tile_Map :: struct {
+	// TODO: Smaller int size?
+	rows, cols: int,
+	// TODO: Store custom stride to allow taking subset views?
+	// Tiles, stored in row-major order
+	tiles: [^]Tile,
 }
+
+Tile_Row :: []Tile
+
+tile_map_get_row :: proc(
+	tile_map: Tile_Map,
+	y_offset: int,
+) -> (
+	Tile_Row,
+	bool,
+) {
+	if y_offset < 0 || tile_map.rows <= y_offset {
+		return nil, false
+	}
+	return tile_map.tiles[y_offset * tile_map.cols:][:tile_map.cols], true
+}
+
+tile_row_get_ptr :: proc(tile_row: Tile_Row, x_offset: int) -> (^Tile, bool) {
+	return slice.get_ptr(tile_row[:], x_offset)
+}
+
+tile_map_get_ptr :: proc(
+	tile_map: Tile_Map,
+	x_offset, y_offset: int,
+) -> (
+	^Tile,
+	bool,
+) {
+	if row, ok := tile_map_get_row(tile_map, y_offset); ok {
+		return tile_row_get_ptr(row, x_offset)
+	}
+	return nil, false
+}
+
+tile_map_get :: proc(
+	tile_map: Tile_Map,
+	x_offset, y_offset: int,
+) -> (
+	u8,
+	bool,
+) {
+	if ptr, ok := tile_map_get_ptr(tile_map, x_offset, y_offset); ok {
+		return ptr^, true
+	}
+	return 0, false
+}
+
+Tile_Map_Row_Iter :: struct {
+	offset: int,
+}
+
+Tile_Row_Col_Iter :: struct {
+	offset: int,
+}
+
+tile_map_next_row :: proc(
+	tile_map: Tile_Map,
+	iter: ^Tile_Map_Row_Iter,
+) -> (
+	row: Tile_Row,
+	offset: int,
+	ok: bool,
+) {
+	row, ok = tile_map_get_row(tile_map, iter.offset)
+	if !ok do return
+	offset = iter.offset
+	iter.offset += 1
+	return
+}
+
+tile_row_next_col :: proc(
+	tile_row: Tile_Row,
+	iter: ^Tile_Row_Col_Iter,
+) -> (
+	tile: ^Tile,
+	offset: int,
+	ok: bool,
+) {
+	tile, ok = tile_row_get_ptr(tile_row, iter.offset)
+	if !ok do return
+	offset = iter.offset
+	iter.offset += 1
+	return
+}
+
+can_move_in_tile_map :: proc(tile_map: Tile_Map, x, y: f32) -> bool {
+	tile_x := int(x)
+	tile_y := int(y)
+	tile, ok := tile_map_get(tile_map, tile_x, tile_y)
+	return ok && tile == 0
+}
+
+make_static_tile_map :: proc "contextless" (tiles: ^[$N][$M]Tile) -> Tile_Map {
+	return {rows = N, cols = M, tiles = ([^]Tile)(tiles)}
+}
+
+// TODO: Move tile size / tile map size here?
+// Does it make sense for tile maps to have different sizes?
+World_Map :: struct {
+	rows, cols: int,
+	tile_maps: [^]Tile_Map,
+}
+
+world_resolve_tile_map :: proc(
+	world: World_Map,
+	x, y: f32,
+) -> (
+	tile_map: ^Tile_Map,
+	local_x, local_y: f32,
+	ok: bool,
+) {
+	// TODO: Make sure these work with negative coordinates?
+	tile_x := int(x / TILE_MAP_WIDTH)
+	tile_y := int(y / TILE_MAP_HEIGHT)
+
+	if tile_y < 0 ||
+	   world.rows <= tile_y ||
+	   tile_x < 0 ||
+	   world.cols <= tile_x {
+		return
+	}
+
+	tile_map = &world.tile_maps[tile_y * world.cols + tile_x]
+	local_x = math.mod(x, TILE_MAP_WIDTH)
+	local_y = math.mod(y, TILE_MAP_HEIGHT)
+	ok = true
+	return
+}
+
+make_static_world_map :: proc "contextless" (
+	tile_maps: ^[$N][$M]Tile_Map,
+) -> World_Map {
+	// TODO: Allow heterogenous tile maps?
+	for y in 0 ..< N {
+		for x in 0 ..< M {
+			assert_contextless(tile_maps[y][x].cols == TILE_MAP_WIDTH)
+			assert_contextless(tile_maps[y][x].rows == TILE_MAP_HEIGHT)
+		}
+	}
+	return {rows = N, cols = M, tile_maps = ([^]Tile_Map)(tile_maps)}
+}
+
+TILE_MAP00 := make_static_tile_map(
+	&[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile {
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1},
+		{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0},
+		{1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
+	},
+)
+
+TILE_MAP01 := make_static_tile_map(
+	&[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile {
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+	},
+)
+
+TILE_MAP10 := make_static_tile_map(
+	&[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile {
+		{1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+	},
+)
+
+TILE_MAP11 := make_static_tile_map(
+	&[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile {
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+	},
+)
+
+// NOTE: If this is defined before the sub-components, it will be
+// zero-initialized
+// TODO: Report that as a bug?
+global_tiles := [2][2]Tile_Map {
+	{TILE_MAP00, TILE_MAP01},
+	{TILE_MAP10, TILE_MAP11},
+}
+
+// TODO: This leads to a compiler error if `global_tiles` is inlined. Make a
+// minimal reproduction and report the error
+WORLD_MAP := make_static_world_map(&global_tiles)
+
+TILE_MAP_WIDTH :: 17
+TILE_MAP_HEIGHT :: 9
+
+TILE_WIDTH: f32 : 60
+TILE_X_OFFSET: f32 : TILE_WIDTH / -2
+TILE_HEIGHT: f32 : 60
+TILE_Y_OFFSET: f32 : 0
 
 @(export)
 handmade_game_render :: proc "contextless" (
 	memory: api.Memory,
-	fb: api.Frame_Buffer,
+	fb: Frame_Buffer,
 ) {
 	context = get_game_context(memory)
 	state := get_game_state(memory)
 
 	frame_buffer_fill(fb, make_pixel(0xFF00FF))
 
-	tile_width := f32(fb.width) / (len(TILE_MAP[0]) - 1)
-	tile_x_offset: f32 = tile_width / -2.0
+	cur_tile := WORLD_MAP.tile_maps[0]
 
-	tile_height := f32(fb.height) / len(TILE_MAP)
-	tile_y_offset: f32 = 0
-
-	for row, y in TILE_MAP {
-		for col, x in row {
+	row_iter: Tile_Map_Row_Iter
+	for row, row_offset in tile_map_next_row(cur_tile, &row_iter) {
+		col_iter: Tile_Row_Col_Iter
+		for col, col_offset in tile_row_next_col(row, &col_iter) {
 			color: Color
-			if col == 0 {
+			if col^ == 0 {
 				color = make_color_grey(0.1)
 			} else {
 				color = make_color_grey(0.8)
 			}
 			render_rect(
 				fb,
-				x = f32(x) * tile_width + tile_x_offset,
-				y = f32(y) * tile_height + tile_y_offset,
-				w = tile_width,
-				h = tile_height,
+				x = f32(col_offset) * TILE_WIDTH + TILE_X_OFFSET,
+				y = f32(row_offset) * TILE_HEIGHT + TILE_Y_OFFSET,
+				w = TILE_WIDTH,
+				h = TILE_HEIGHT,
 				color = color,
 			)
 		}
 	}
 
-	player_width := 0.6 * tile_width
-	player_height := 0.75 * tile_height
+	player_width := 0.6 * TILE_WIDTH
+	player_height := 0.75 * TILE_HEIGHT
+
 	render_rect(
 		fb,
-		x = state.player_x - player_width / 2.0,
-		y = state.player_y - player_height,
+		x = state.player_x * TILE_WIDTH + TILE_X_OFFSET - player_width / 2.0,
+		y = state.player_y * TILE_HEIGHT + TILE_Y_OFFSET - player_height,
 		w = player_width,
 		h = player_height,
 		color = {r = 0.8, g = 0.1, b = 0.1},
@@ -186,7 +412,7 @@ pixel_bits :: proc(p: Pixel) -> Pixel_Bits {
 	return Pixel_Bits(p.b) | (Pixel_Bits(p.g) << 8) | (Pixel_Bits(p.r) << 16)
 }
 
-frame_buffer_row :: proc(fb: api.Frame_Buffer, y: int) -> []Pixel {
+frame_buffer_row :: proc(fb: Frame_Buffer, y: int) -> []Pixel {
 	assert(y >= 0)
 	assert(y < int(fb.height))
 	return mem.slice_ptr(
@@ -195,21 +421,21 @@ frame_buffer_row :: proc(fb: api.Frame_Buffer, y: int) -> []Pixel {
 	)
 }
 
-frame_buffer_px :: proc(fb: api.Frame_Buffer, x, y: int) -> ^Pixel {
+frame_buffer_px :: proc(fb: Frame_Buffer, x, y: int) -> ^Pixel {
 	assert(x >= 0)
 	assert(x < int(fb.width))
 	return &frame_buffer_row(fb, y)[x]
 }
 
-frame_buffer_get :: proc(fb: api.Frame_Buffer, x, y: int) -> Pixel {
+frame_buffer_get :: proc(fb: Frame_Buffer, x, y: int) -> Pixel {
 	return frame_buffer_px(fb, x, y)^
 }
 
-frame_buffer_set :: proc(fb: api.Frame_Buffer, x, y: int, p: Pixel) {
+frame_buffer_set :: proc(fb: Frame_Buffer, x, y: int, p: Pixel) {
 	frame_buffer_px(fb, x, y)^ = p
 }
 
-frame_buffer_fill :: proc(fb: api.Frame_Buffer, p: Pixel) {
+frame_buffer_fill :: proc(fb: Frame_Buffer, p: Pixel) {
 	// TODO: Is it OK to to write over gaps in the stride?
 	for y in 0 ..< fb.height {
 		row := frame_buffer_row(fb, int(y))
@@ -225,7 +451,7 @@ round_clamp_px :: #force_inline proc(v: f32, #any_int fb_dim: int) -> int {
 	return clamp(round_px(v), 0, fb_dim)
 }
 
-render_rect :: proc(fb: api.Frame_Buffer, x, y, w, h: f32, color: Color) {
+render_rect :: proc(fb: Frame_Buffer, x, y, w, h: f32, color: Color) {
 	pixel := make_pixel(color)
 	y_min := round_clamp_px(y, fb.height)
 	y_max := round_clamp_px(y + h, fb.height)
