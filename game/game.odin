@@ -1,5 +1,6 @@
 package game
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:math"
 import "core:math/linalg"
@@ -55,32 +56,31 @@ handmade_game_update :: proc "contextless" (
 	state := get_game_state(memory)
 
 	// Sign of the movement: -1, 0, +1
-	player_dir_x, player_dir_y: f32
+	player_dir: [2]f32
 	// tiles / sec
 	player_rate: f32 = 2e-9 * f32(input.dt_ns)
 
 	if input.keyboard[.W].end_pressed || input.keyboard[.Up].end_pressed {
-		player_dir_y -= 1
+		player_dir[1] -= 1
 	}
 	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed {
-		player_dir_x -= 1
+		player_dir[0] -= 1
 	}
 	if input.keyboard[.S].end_pressed || input.keyboard[.Down].end_pressed {
-		player_dir_y += 1
+		player_dir[1] += 1
 	}
 	if input.keyboard[.D].end_pressed || input.keyboard[.Right].end_pressed {
-		player_dir_x += 1
+		player_dir[0] += 1
 	}
 
 	// Scale diagonal movement
 	player_movement: f32 = player_rate
-	if player_dir_x != 0 && player_dir_y != 0 {
+	if player_dir[0] != 0 && player_dir[1] != 0 {
 		player_movement *= math.sqrt(f32(0.5))
 	}
 
 	new_coord := state.player_coord
-	new_coord.local[0] += player_dir_x * player_movement
-	new_coord.local[1] += player_dir_y * player_movement
+	new_coord.local += player_dir * player_movement
 
 	if can_move_in_world(
 		   state.world,
@@ -107,27 +107,22 @@ World_Coord :: struct {
 }
 
 normalize_coord :: proc(coord: World_Coord) -> World_Coord {
-	tile_shift_x := math.floor(coord.local[0] / TILE_MAP_WIDTH)
-	tile_shift_y := math.floor(coord.local[1] / TILE_MAP_HEIGHT)
+	tile_shift := linalg.floor(coord.local / TILE_MAP_SIZE)
 	return {
-		tile = {
-			coord.tile[0] + i32(tile_shift_x),
-			coord.tile[1] + i32(tile_shift_y),
-		},
-		local = {
-			coord.local[0] - tile_shift_x * TILE_MAP_WIDTH,
-			coord.local[1] - tile_shift_y * TILE_MAP_HEIGHT,
-		},
+		tile = coord.tile + linalg.to_i32(tile_shift),
+		local = coord.local - tile_shift * TILE_MAP_SIZE,
 	}
 }
 
+in_bounds :: proc(
+	v: [2]$E,
+	bounds: [2]E,
+) -> bool where intrinsics.type_is_numeric(E) {
+	return 0 <= v[0] && v[0] < bounds[0] && 0 <= v[1] && v[1] < bounds[1]
+}
+
 coord_is_normalized :: proc(coord: World_Coord) -> bool {
-	return(
-		0 <= coord.local[0] &&
-		coord.local[0] < TILE_MAP_WIDTH &&
-		0 <= coord.local[1] &&
-		coord.local[1] < TILE_MAP_HEIGHT \
-	)
+	return in_bounds(coord.local, TILE_MAP_SIZE)
 }
 
 offset_coord :: proc(coord: World_Coord, x, y: f32) -> World_Coord {
@@ -229,7 +224,7 @@ make_static_tile_map :: proc "contextless" (
 // TODO: Move tile size / tile map size here?
 // Does it make sense for tile maps to have different sizes?
 World_Map :: struct {
-	rows, cols: int,
+	size: [2]i32,
 	tile_maps: [^]Tile_Map,
 }
 
@@ -245,19 +240,11 @@ world_get_tile :: proc(
 	tile: World_Tile,
 	ok: bool,
 ) {
-	if tile_pos[1] < 0 ||
-	   world.rows <= int(tile_pos[1]) ||
-	   tile_pos[0] < 0 ||
-	   world.cols <= int(tile_pos[0]) {
-		return
-	}
-
+	if !in_bounds(tile_pos, world.size) do return
+	tile_index := int(tile_pos[1] * world.size[0] + tile_pos[0])
 	return {
-			offset = {
-				f32(tile_pos[0]) * TILE_MAP_WIDTH,
-				f32(tile_pos[1]) * TILE_MAP_HEIGHT,
-			},
-			tile_map = &world.tile_maps[int(tile_pos[1]) * world.cols + int(tile_pos[0])],
+			offset = linalg.to_f32(tile_pos) * TILE_MAP_SIZE,
+			tile_map = &world.tile_maps[tile_index],
 		},
 		true
 }
@@ -279,7 +266,7 @@ can_move_in_world :: proc(world: World_Map, coord: World_Coord) -> bool {
 make_static_world_map :: proc "contextless" (
 	tile_maps: ^[$N][$M]Tile_Map,
 ) -> World_Map {
-	return {rows = N, cols = M, tile_maps = ([^]Tile_Map)(tile_maps)}
+	return {size = {M, N}, tile_maps = ([^]Tile_Map)(tile_maps)}
 }
 
 TILE_MAP00 := make_static_tile_map(
@@ -348,11 +335,10 @@ global_tiles := [2][2]Tile_Map {
 
 TILE_MAP_WIDTH :: 17
 TILE_MAP_HEIGHT :: 9
+TILE_MAP_SIZE :: [2]f32{TILE_MAP_WIDTH, TILE_MAP_HEIGHT}
 
-TILE_WIDTH: f32 : 60
-TILE_X_OFFSET: f32 : TILE_WIDTH / -2
-TILE_HEIGHT: f32 : 60
-TILE_Y_OFFSET: f32 : 0
+TILE_SIZE_PX: f32 : 60
+TILE_OFFSET_PX :: [2]f32{-TILE_SIZE_PX / 2, 0}
 
 PLAYER_WIDTH: f32 : 0.6
 PLAYER_HEIGHT: f32 : 0.75
@@ -387,10 +373,8 @@ handmade_game_render :: proc "contextless" (
 			}
 			render_rect_tile(
 				fb,
-				x = f32(col_offset),
-				y = f32(row_offset),
-				w = 1,
-				h = 1,
+				pos = linalg.to_f32([2]int{col_offset, row_offset}),
+				size = 1,
 				color = color,
 			)
 		}
@@ -398,10 +382,8 @@ handmade_game_render :: proc "contextless" (
 
 	render_rect_tile(
 		fb,
-		x = state.player_coord.local[0] - PLAYER_WIDTH / 2.0,
-		y = state.player_coord.local[1] - PLAYER_HEIGHT,
-		w = PLAYER_WIDTH,
-		h = PLAYER_HEIGHT,
+		pos = state.player_coord.local - {PLAYER_WIDTH / 2, PLAYER_HEIGHT},
+		size = {PLAYER_WIDTH, PLAYER_HEIGHT},
 		color = {r = 0.8, g = 0.1, b = 0.1},
 	)
 }
@@ -497,13 +479,14 @@ round_clamp_px :: #force_inline proc(v: f32, #any_int fb_dim: int) -> int {
 	return clamp(round_px(v), 0, fb_dim)
 }
 
-render_rect :: proc(fb: Frame_Buffer, x, y, w, h: f32, color: Color) {
+render_rect :: proc(fb: Frame_Buffer, pos, size: [2]f32, color: Color) {
 	pixel := make_pixel(color)
-	y_min := round_clamp_px(y, fb.height)
-	y_max := round_clamp_px(y + h, fb.height)
 
-	x_min := round_clamp_px(x, fb.width)
-	x_max := round_clamp_px(x + w, fb.width)
+	x_min := round_clamp_px(pos[0], fb.width)
+	x_max := round_clamp_px(pos[0] + size[0], fb.width)
+
+	y_min := round_clamp_px(pos[1], fb.height)
+	y_max := round_clamp_px(pos[1] + size[1], fb.height)
 
 	for y_px in y_min ..< y_max {
 		row := frame_buffer_row(fb, y_px)
@@ -512,13 +495,11 @@ render_rect :: proc(fb: Frame_Buffer, x, y, w, h: f32, color: Color) {
 	}
 }
 
-render_rect_tile :: proc(fb: Frame_Buffer, x, y, w, h: f32, color: Color) {
+render_rect_tile :: proc(fb: Frame_Buffer, pos, size: [2]f32, color: Color) {
 	render_rect(
 		fb,
-		x = x * TILE_WIDTH + TILE_X_OFFSET,
-		y = y * TILE_HEIGHT + TILE_Y_OFFSET,
-		w = w * TILE_WIDTH,
-		h = h * TILE_HEIGHT,
+		pos = pos * TILE_SIZE_PX + TILE_OFFSET_PX,
+		size = size * TILE_SIZE_PX,
 		color = color,
 	)
 }
