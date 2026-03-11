@@ -15,7 +15,7 @@ State :: struct {
 	// Relies on game memory being 0-initialized
 	initialized: bool,
 	world: World_Map,
-	player_coord: World_Coord,
+	player_pos: World_Pos,
 }
 
 get_game_context :: proc "contextless" (
@@ -38,8 +38,8 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 		state^ = {
 			initialized = true,
 			world = make_static_world_map(&global_tiles),
-			player_coord = {
-				tile = {0, 0},
+			player_pos = {
+				chunk = {0, 0},
 				local = {f32(TILE_MAP_WIDTH) / 2, f32(TILE_MAP_HEIGHT) / 2},
 			},
 		}
@@ -57,8 +57,8 @@ handmade_game_update :: proc "contextless" (
 
 	// Sign of the movement: -1, 0, +1
 	player_dir: [2]f32
-	// tiles / sec
-	player_rate: f32 = 2e-9 * f32(input.dt_ns)
+	PLAYER_SPEED: f32 : 4 // tile/sec
+	player_delta: f32 = PLAYER_SPEED * 1e-9 * f32(input.dt_ns)
 
 	if input.keyboard[.W].end_pressed || input.keyboard[.Up].end_pressed {
 		player_dir[1] -= 1
@@ -74,43 +74,43 @@ handmade_game_update :: proc "contextless" (
 	}
 
 	// Scale diagonal movement
-	player_movement: f32 = player_rate
+	coord_delta := player_delta
 	if player_dir[0] != 0 && player_dir[1] != 0 {
-		player_movement *= math.sqrt(f32(0.5))
+		coord_delta *= math.sqrt(f32(0.5))
 	}
 
-	new_coord := state.player_coord
-	new_coord.local += player_dir * player_movement
+	new_pos := state.player_pos
+	new_pos.local += player_dir * coord_delta
 
 	if can_move_in_world(
 		   state.world,
-		   offset_coord(new_coord, -PLAYER_WIDTH / 2, 0),
+		   offset_pos(new_pos, -PLAYER_WIDTH / 2, 0),
 	   ) &&
 	   can_move_in_world(
 		   state.world,
-		   offset_coord(new_coord, PLAYER_WIDTH / 2, 0),
+		   offset_pos(new_pos, PLAYER_WIDTH / 2, 0),
 	   ) &&
 	   can_move_in_world(
 		   state.world,
-		   offset_coord(new_coord, 0, -PLAYER_COLLISION_HEIGHT_TILES),
+		   offset_pos(new_pos, 0, -PLAYER_COLLISION_HEIGHT_TILES),
 	   ) {
-		state.player_coord = normalize_coord(new_coord)
+		state.player_pos = normalize_pos(new_pos)
 	}
 }
 
-World_Coord :: struct {
-	// Offset of the current tile map (in tile-sized chunks)
-	// TODO: Rename?
-	tile: [2]i32,
+World_Pos :: struct {
+	// Index of of the current tile map (in tile-map-sized chunks)
+	chunk: [2]i32,
 	// Offset within the tile map
 	local: [2]f32,
 }
 
-normalize_coord :: proc(coord: World_Coord) -> World_Coord {
-	tile_shift := linalg.floor(coord.local / TILE_MAP_SIZE)
+normalize_pos :: proc(pos: World_Pos) -> World_Pos {
+	// TODO: Make this resilient to precision errors (unit test?)
+	tile_shift := linalg.floor(pos.local / TILE_MAP_SIZE)
 	return {
-		tile = coord.tile + linalg.to_i32(tile_shift),
-		local = coord.local - tile_shift * TILE_MAP_SIZE,
+		chunk = pos.chunk + linalg.to_i32(tile_shift),
+		local = pos.local - tile_shift * TILE_MAP_SIZE,
 	}
 }
 
@@ -121,15 +121,15 @@ in_bounds :: proc(
 	return 0 <= v[0] && v[0] < bounds[0] && 0 <= v[1] && v[1] < bounds[1]
 }
 
-coord_is_normalized :: proc(coord: World_Coord) -> bool {
-	return in_bounds(coord.local, TILE_MAP_SIZE)
+pos_is_normalized :: proc(pos: World_Pos) -> bool {
+	return in_bounds(pos.local, TILE_MAP_SIZE)
 }
 
-offset_coord :: proc(coord: World_Coord, x, y: f32) -> World_Coord {
-	coord := coord
-	coord.local[0] += x
-	coord.local[1] += y
-	return coord
+offset_pos :: proc(pos: World_Pos, x, y: f32) -> World_Pos {
+	pos := pos
+	pos.local[0] += x
+	pos.local[1] += y
+	return pos
 }
 
 Tile :: u8
@@ -242,16 +242,16 @@ world_get_tile :: proc(
 
 can_move_in_world_norm :: proc(
 	world: World_Map,
-	norm_coord: World_Coord,
+	pos: World_Pos,
 ) -> bool {
-	assert(coord_is_normalized(norm_coord))
-	tile, ok := world_get_tile(world, norm_coord.tile)
+	assert(pos_is_normalized(pos))
+	tile, ok := world_get_tile(world, pos.chunk)
 	if !ok do return false
-	return can_move_in_tile_map(tile^, norm_coord.local)
+	return can_move_in_tile_map(tile^, pos.local)
 }
 
-can_move_in_world :: proc(world: World_Map, coord: World_Coord) -> bool {
-	return can_move_in_world_norm(world, normalize_coord(coord))
+can_move_in_world :: proc(world: World_Map, pos: World_Pos) -> bool {
+	return can_move_in_world_norm(world, normalize_pos(pos))
 }
 
 make_static_world_map :: proc "contextless" (
@@ -331,8 +331,8 @@ TILE_MAP_SIZE :: [2]f32{TILE_MAP_WIDTH, TILE_MAP_HEIGHT}
 TILE_SIZE_PX: f32 : 60
 TILE_OFFSET_PX :: [2]f32{-TILE_SIZE_PX / 2, 0}
 
-PLAYER_WIDTH: f32 : 0.6
-PLAYER_HEIGHT: f32 : 0.75
+PLAYER_WIDTH: f32 : 0.7
+PLAYER_HEIGHT: f32 : 1
 PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.25
 
 @(export)
@@ -345,12 +345,14 @@ handmade_game_render :: proc "contextless" (
 
 	frame_buffer_fill(fb, make_pixel(0xFF00FF))
 
-	assert(coord_is_normalized(state.player_coord))
-	cur_tile, ok := world_get_tile(state.world, state.player_coord.tile)
+	assert(pos_is_normalized(state.player_pos))
+	cur_tile, ok := world_get_tile(state.world, state.player_pos.chunk)
 	if !ok {
 		// TODO: ???
 		panic("player out of bounds!")
 	}
+
+	player_tile := linalg.to_int(linalg.floor(state.player_pos.local))
 
 	row_iter: Tile_Map_Row_Iter
 	for row, row_offset in tile_map_next_row(cur_tile^, &row_iter) {
@@ -361,6 +363,10 @@ handmade_game_render :: proc "contextless" (
 				color = make_color_grey(0.1)
 			} else {
 				color = make_color_grey(0.8)
+			}
+			// Debug: show current player tile
+			if player_tile[0] == col_offset && player_tile[1] == row_offset {
+				color = make_color_grey(1.0)
 			}
 			render_rect_tile(
 				fb,
@@ -373,7 +379,7 @@ handmade_game_render :: proc "contextless" (
 
 	render_rect_tile(
 		fb,
-		pos = state.player_coord.local - {PLAYER_WIDTH / 2, PLAYER_HEIGHT},
+		pos = state.player_pos.local - {PLAYER_WIDTH / 2, PLAYER_HEIGHT},
 		size = {PLAYER_WIDTH, PLAYER_HEIGHT},
 		color = {r = 0.8, g = 0.1, b = 0.1},
 	)
