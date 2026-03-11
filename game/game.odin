@@ -228,25 +228,16 @@ World_Map :: struct {
 	tile_maps: [^]Tile_Map,
 }
 
-World_Tile :: struct {
-	offset: [2]f32,
-	tile_map: ^Tile_Map,
-}
-
 world_get_tile :: proc(
 	world: World_Map,
 	tile_pos: [2]i32,
 ) -> (
-	tile: World_Tile,
+	tile_map: ^Tile_Map,
 	ok: bool,
 ) {
 	if !in_bounds(tile_pos, world.size) do return
 	tile_index := int(tile_pos[1] * world.size[0] + tile_pos[0])
-	return {
-			offset = linalg.to_f32(tile_pos) * TILE_MAP_SIZE,
-			tile_map = &world.tile_maps[tile_index],
-		},
-		true
+	return &world.tile_maps[tile_index], true
 }
 
 can_move_in_world_norm :: proc(
@@ -256,7 +247,7 @@ can_move_in_world_norm :: proc(
 	assert(coord_is_normalized(norm_coord))
 	tile, ok := world_get_tile(world, norm_coord.tile)
 	if !ok do return false
-	return can_move_in_tile_map(tile.tile_map^, norm_coord.local)
+	return can_move_in_tile_map(tile^, norm_coord.local)
 }
 
 can_move_in_world :: proc(world: World_Map, coord: World_Coord) -> bool {
@@ -362,7 +353,7 @@ handmade_game_render :: proc "contextless" (
 	}
 
 	row_iter: Tile_Map_Row_Iter
-	for row, row_offset in tile_map_next_row(cur_tile.tile_map^, &row_iter) {
+	for row, row_offset in tile_map_next_row(cur_tile^, &row_iter) {
 		col_iter: Tile_Row_Col_Iter
 		for col, col_offset in tile_row_next_col(row, &col_iter) {
 			color: Color
