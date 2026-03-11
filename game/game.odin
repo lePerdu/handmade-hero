@@ -6,6 +6,7 @@ import "core:math"
 import "core:math/linalg"
 import "core:mem"
 import "core:slice"
+import "core:testing"
 
 import "api"
 
@@ -107,11 +108,54 @@ World_Pos :: struct {
 
 normalize_pos :: proc(pos: World_Pos) -> World_Pos {
 	// TODO: Make this resilient to precision errors (unit test?)
+	// - Just have pos_is_normalized compare against epsilon? Might be fine to
+	//   let positions be slightly "out of bounds" in most cases.
+	// - Do some comparison against epsilon here?
+	// - Just run the process multiple times until it's OK? (maybe 2 times would
+	//   be always sufficient?)
+	// - Temporarily use fixed point?
 	tile_shift := linalg.floor(pos.local / TILE_MAP_SIZE)
 	return {
 		chunk = pos.chunk + linalg.to_i32(tile_shift),
 		local = pos.local - tile_shift * TILE_MAP_SIZE,
 	}
+}
+
+@(test)
+test_norm_pos :: proc(t: ^testing.T) {
+	testing.expect_value(t, normalize_pos({}), World_Pos{})
+	testing.expect_value(
+		t,
+		normalize_pos({local = {5e-7, 0}}),
+		World_Pos{local = {5e-7, 0}},
+	)
+	testing.expect_value(
+		t,
+		normalize_pos({local = {8, 12 * TILE_MAP_HEIGHT + 0.5}}),
+		World_Pos{chunk = {0, 12}, local = {8, 0.5}},
+	)
+
+	// TODO: These currently fail due to rounding errors
+
+	testing.expect_value(
+		t,
+		normalize_pos({local = {-5e-7, 0}}),
+		// TODO: Should this go to `TILE_MAP_WIDTH - epsilon` or just round `local` to 0?
+		World_Pos {
+			chunk = {-1, 0},
+			local = {TILE_MAP_WIDTH * (1 - math.F32_EPSILON), 0},
+		},
+	)
+
+	testing.expect_value(
+		t,
+		normalize_pos({local = {TILE_MAP_HEIGHT * (1 + math.F32_EPSILON), 5}}),
+		// TODO: Should this go to `TILE_MAP_WIDTH - epsilon` or just round `local` to 0?
+		World_Pos {
+			chunk = {1, 0},
+			local = {TILE_MAP_HEIGHT * math.F32_EPSILON, 5},
+		},
+	)
 }
 
 in_bounds :: proc(
@@ -240,10 +284,7 @@ world_get_tile :: proc(
 	return &world.tile_maps[tile_index], true
 }
 
-can_move_in_world_norm :: proc(
-	world: World_Map,
-	pos: World_Pos,
-) -> bool {
+can_move_in_world_norm :: proc(world: World_Map, pos: World_Pos) -> bool {
 	assert(pos_is_normalized(pos))
 	tile, ok := world_get_tile(world, pos.chunk)
 	if !ok do return false
