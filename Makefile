@@ -3,11 +3,13 @@ WAYLAND_DATA_DIR ?= /usr/share
 BUILD = build
 DATA = data
 EXEC = $(BUILD)/game
+TEST_EXEC = $(BUILD)/game-test
 DYNLIB = $(BUILD)/game.so
 WAYLAND_SCANNER = $(BUILD)/wayland-scanner
 
-ODIN_FLAGS = -debug
-# ODIN_FLAGS = -o:speed
+ODIN_FLAGS_DEBUG = -debug
+ODIN_FLAGS_RELEASE = -o:speed
+ODIN_FLAGS = $(ODIN_FLAGS_DEBUG)
 
 all: game
 
@@ -26,6 +28,12 @@ wayland-scanner: | $(BUILD)
 
 run: game
 	./$(EXEC)
+
+build-test: | $(BUILD)
+	odin build game $(ODIN_FLAGS) -build-mode:test -out:$(TEST_EXEC)
+
+test: build-test
+	./$(TEST_EXEC)
 
 gen-wayland: wayland-scanner
 	$(WAYLAND_SCANNER) \
@@ -47,4 +55,5 @@ clean-data:
 clean-all: clean clean-data
 
 .PHONY: all run game reload wayland-scanner gen-wayland \
+	build-test test \
 	clean clean-data clean-all

@@ -1,6 +1,6 @@
 [
   {
-    "label": "Debug",
+    "label": "Game",
     "adapter": "CodeLLDB",
     "request": "launch",
     "program": "build/game",
@@ -11,13 +11,22 @@
     // Especially when the lib is re-generated
   },
   {
-    "label": "Debug scanner",
+    "label": "Scanner",
     "adapter": "CodeLLDB",
     "request": "launch",
     "program": "build/wayland-scanner",
     "args": ["/usr/share/wayland/wayland.xml", "wayland/wayland_protocol.odin"],
     "build": {
       "command": "make wayland-scanner",
+    },
+  },
+  {
+    "label": "Test",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "build/game-test",
+    "build": {
+      "command": "make build-test",
     },
   },
 ]
