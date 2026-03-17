@@ -38,10 +38,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	if !state.initialized {
 		state^ = {
 			initialized = true,
-			player_pos = {
-				chunk = {0, 0},
-				local = {f32(TILE_MAP_WIDTH) / 2, f32(TILE_MAP_HEIGHT) / 2},
-			},
+			player_pos = {tile = WINDOW_CENTER, local = 0.5},
 		}
 	}
 	// Re-initialize every time to make it easier to change
@@ -103,12 +100,12 @@ handmade_game_update :: proc "contextless" (
 // World-relative position. Each `[2]T` is a pair of `x` and `y`, with positive
 // going to the right and up.
 World_Pos :: struct {
-	// Position of of the current chunk (in tile-map-sized chunks)
-	chunk: [2]i32,
-	// Position in the chunk, relative to the bottom-left of the chunk
+	// Position of of the tile
+	tile: [2]i32,
+	// Position within the tile, from [0-1)
 	local: [2]f32,
-	// TODO: Split `local` into an int tile index and a inside-tile position?
-	// TODO: Make `local` relative to the center of the tile map / tile?
+	// TODO: Make `local` relative to the center of the tile?
+	// TODO: Store `local` as f16 when packing?
 }
 
 normalize_pos :: proc(pos: World_Pos) -> World_Pos {
@@ -119,13 +116,15 @@ normalize_pos :: proc(pos: World_Pos) -> World_Pos {
 	// - Just run the process multiple times until it's OK? (maybe 2 times would
 	//   be always sufficient?)
 	// - Temporarily use fixed point?
-	tile_shift := linalg.floor(pos.local / TILE_MAP_SIZE)
+	// - What about wrap-around? Just wrap to the other side of the world?
+	tile_shift := linalg.floor(pos.local)
 	return {
-		chunk = pos.chunk + linalg.to_i32(tile_shift),
-		local = pos.local - tile_shift * TILE_MAP_SIZE,
+		tile = pos.tile + linalg.to_i32(tile_shift),
+		local = linalg.fract(pos.local),
 	}
 }
 
+// TODO: Fix test cases
 @(test)
 test_norm_pos :: proc(t: ^testing.T) {
 	testing.expect_value(t, normalize_pos({}), World_Pos{})
@@ -136,8 +135,8 @@ test_norm_pos :: proc(t: ^testing.T) {
 	)
 	testing.expect_value(
 		t,
-		normalize_pos({local = {8, 12 * TILE_MAP_HEIGHT + 0.5}}),
-		World_Pos{chunk = {0, 12}, local = {8, 0.5}},
+		normalize_pos({local = {8, 12 * CHUNK_SIZE + 0.5}}),
+		World_Pos{tile = {0, 12}, local = {8, 0.5}},
 	)
 
 	// TODO: These currently fail due to rounding errors
@@ -145,21 +144,18 @@ test_norm_pos :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		normalize_pos({local = {-5e-7, 0}}),
-		// TODO: Should this go to `TILE_MAP_WIDTH - epsilon` or just round `local` to 0?
+		// TODO: Should this go to `CHUNK_SIZE - epsilon` or just round `local` to 0?
 		World_Pos {
-			chunk = {-1, 0},
-			local = {TILE_MAP_WIDTH * (1 - math.F32_EPSILON), 0},
+			tile = {-1, 0},
+			local = {CHUNK_SIZE * (1 - math.F32_EPSILON), 0},
 		},
 	)
 
 	testing.expect_value(
 		t,
-		normalize_pos({local = {TILE_MAP_HEIGHT * (1 + math.F32_EPSILON), 5}}),
-		// TODO: Should this go to `TILE_MAP_WIDTH - epsilon` or just round `local` to 0?
-		World_Pos {
-			chunk = {1, 0},
-			local = {TILE_MAP_HEIGHT * math.F32_EPSILON, 5},
-		},
+		normalize_pos({local = {CHUNK_SIZE * (1 + math.F32_EPSILON), 5}}),
+		// TODO: Should this go to `CHUNK_SIZE - epsilon` or just round `local` to 0?
+		World_Pos{tile = {1, 0}, local = {CHUNK_SIZE * math.F32_EPSILON, 5}},
 	)
 }
 
@@ -171,7 +167,7 @@ in_bounds :: proc(
 }
 
 pos_is_normalized :: proc(pos: World_Pos) -> bool {
-	return in_bounds(pos.local, TILE_MAP_SIZE)
+	return in_bounds(pos.local, 1)
 }
 
 offset_pos :: proc(pos: World_Pos, x, y: f32) -> World_Pos {
@@ -187,85 +183,41 @@ Tile :: u8
 Tile_Map :: struct {
 	// TODO: Store custom stride to allow taking subset views?
 	// Tiles, stored in row-major order
-	tiles: ^[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile,
+	tiles: ^[CHUNK_SIZE][CHUNK_SIZE]Tile,
 }
 
-Tile_Row :: ^[TILE_MAP_WIDTH]Tile
+Tile_Row :: ^[CHUNK_SIZE]Tile
 
 tile_map_get_row :: proc(
 	tile_map: Tile_Map,
-	y_offset: int,
+	y_offset: i32,
 ) -> (
 	Tile_Row,
 	bool,
 ) {
-	return slice.get_ptr(tile_map.tiles[:], y_offset)
+	return slice.get_ptr(tile_map.tiles[:], int(y_offset))
 }
 
-tile_row_get_ptr :: proc(tile_row: Tile_Row, x_offset: int) -> (^Tile, bool) {
-	return slice.get_ptr(tile_row[:], x_offset)
+tile_row_get_ptr :: proc(tile_row: Tile_Row, x_offset: i32) -> (^Tile, bool) {
+	return slice.get_ptr(tile_row[:], int(x_offset))
 }
 
-tile_map_get_ptr :: proc(tile_map: Tile_Map, offset: [2]int) -> (^Tile, bool) {
+tile_map_get_ptr :: proc(tile_map: Tile_Map, offset: [2]i32) -> (^Tile, bool) {
 	if row, ok := tile_map_get_row(tile_map, offset[1]); ok {
 		return tile_row_get_ptr(row, offset[0])
 	}
 	return nil, false
 }
 
-tile_map_get :: proc(tile_map: Tile_Map, offset: [2]int) -> (u8, bool) {
+tile_map_get :: proc(tile_map: Tile_Map, offset: [2]i32) -> (u8, bool) {
 	if ptr, ok := tile_map_get_ptr(tile_map, offset); ok {
 		return ptr^, true
 	}
 	return 0, false
 }
 
-Tile_Map_Row_Iter :: struct {
-	offset: int,
-}
-
-Tile_Row_Col_Iter :: struct {
-	offset: int,
-}
-
-tile_map_next_row :: proc(
-	tile_map: Tile_Map,
-	iter: ^Tile_Map_Row_Iter,
-) -> (
-	row: Tile_Row,
-	offset: int,
-	ok: bool,
-) {
-	row, ok = tile_map_get_row(tile_map, iter.offset)
-	if !ok do return
-	offset = iter.offset
-	iter.offset += 1
-	return
-}
-
-tile_row_next_col :: proc(
-	tile_row: Tile_Row,
-	iter: ^Tile_Row_Col_Iter,
-) -> (
-	tile: ^Tile,
-	offset: int,
-	ok: bool,
-) {
-	tile, ok = tile_row_get_ptr(tile_row, iter.offset)
-	if !ok do return
-	offset = iter.offset
-	iter.offset += 1
-	return
-}
-
-can_move_in_tile_map :: proc(tile_map: Tile_Map, pos: [2]f32) -> bool {
-	tile_pos := linalg.to_int(pos)
-	tile, ok := tile_map_get(tile_map, tile_pos)
-	return ok && tile == 0
-}
-
 make_static_tile_map :: proc "contextless" (
-	tiles: ^[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile,
+	tiles: ^[CHUNK_SIZE][CHUNK_SIZE]Tile,
 ) -> Tile_Map {
 	return {tiles}
 }
@@ -277,23 +229,54 @@ World_Map :: struct {
 	tile_maps: [^]Tile_Map,
 }
 
-world_get_tile :: proc(
+CHUNK_SIZE_BITS :: 4
+CHUNK_SIZE :: 1 << CHUNK_SIZE_BITS
+CHUNK_SIZE_MASK :: CHUNK_SIZE - 1
+
+world_pos_split_chunk :: proc(tile_pos: [2]i32) -> ([2]i32, [2]i32) {
+	// TODO: Report issue for supporting `>>` on arrays?
+	return [2]i32 {
+			tile_pos[0] >> CHUNK_SIZE_BITS,
+			tile_pos[1] >> CHUNK_SIZE_BITS,
+		},
+		tile_pos & CHUNK_SIZE_MASK
+}
+
+world_get_chunk :: proc(
 	world: World_Map,
-	tile_pos: [2]i32,
+	chunk_pos: [2]i32,
 ) -> (
 	tile_map: ^Tile_Map,
 	ok: bool,
 ) {
-	if !in_bounds(tile_pos, world.size) do return
-	tile_index := int(tile_pos[1] * world.size[0] + tile_pos[0])
+	if !in_bounds(chunk_pos, world.size) do return
+	tile_index := int(chunk_pos[1] * world.size[0] + chunk_pos[0])
 	return &world.tile_maps[tile_index], true
+}
+
+world_get_tile_in_chunk :: proc(
+	world: World_Map,
+	chunk_pos: [2]i32,
+	// TODO: Naming convention to distinguish between global and chunk-local
+	// tile positions
+	tile_pos: [2]i32,
+) -> (
+	tile: ^Tile,
+	ok: bool,
+) {
+	tile_map := world_get_chunk(world, chunk_pos) or_return
+	return tile_map_get_ptr(tile_map^, tile_pos)
+}
+
+world_get_tile :: proc(world: World_Map, tile_pos: [2]i32) -> (^Tile, bool) {
+	chunk_pos, tile_pos := world_pos_split_chunk(tile_pos)
+	return world_get_tile_in_chunk(world, chunk_pos, tile_pos)
 }
 
 can_move_in_world_norm :: proc(world: World_Map, pos: World_Pos) -> bool {
 	assert(pos_is_normalized(pos))
-	tile, ok := world_get_tile(world, pos.chunk)
-	if !ok do return false
-	return can_move_in_tile_map(tile^, pos.local)
+	tile, ok := world_get_tile(world, pos.tile)
+	return ok && tile^ == 0
 }
 
 can_move_in_world :: proc(world: World_Map, pos: World_Pos) -> bool {
@@ -307,58 +290,86 @@ make_static_world_map :: proc "contextless" (
 }
 
 TILE_MAP00 := make_static_tile_map(
-	&[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile {
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1},
-		{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0},
-		{1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
+	&[CHUNK_SIZE][CHUNK_SIZE]Tile {
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0},
+		{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1},
+		{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
+		{1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0},
+		{1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0},
 	},
 )
 
 TILE_MAP01 := make_static_tile_map(
-	&[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile {
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+	&[CHUNK_SIZE][CHUNK_SIZE]Tile {
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1},
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
 	},
 )
 
 TILE_MAP10 := make_static_tile_map(
-	&[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile {
-		{1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+	&[CHUNK_SIZE][CHUNK_SIZE]Tile {
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
 	},
 )
 
 TILE_MAP11 := make_static_tile_map(
-	&[TILE_MAP_HEIGHT][TILE_MAP_WIDTH]Tile {
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+	&[CHUNK_SIZE][CHUNK_SIZE]Tile {
+		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
 	},
 )
 
@@ -370,16 +381,16 @@ global_tiles := [2][2]Tile_Map {
 	{TILE_MAP10, TILE_MAP11},
 }
 
-TILE_MAP_WIDTH :: 17
-TILE_MAP_HEIGHT :: 9
-TILE_MAP_SIZE :: [2]f32{TILE_MAP_WIDTH, TILE_MAP_HEIGHT}
-
-TILE_SIZE_PX: f32 : 60
+TILE_SIZE_PX :: 60
 TILE_OFFSET_PX :: [2]f32{-TILE_SIZE_PX / 2, 0}
 
 PLAYER_WIDTH: f32 : 0.7
 PLAYER_HEIGHT: f32 : 1
 PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.25
+
+WINDOW_TILES_WIDTH :: 17
+WINDOW_TILES_HEIGHT :: 9
+WINDOW_CENTER :: [2]i32{WINDOW_TILES_WIDTH / 2, WINDOW_TILES_HEIGHT / 2}
 
 @(export)
 handmade_game_render :: proc "contextless" (
@@ -392,31 +403,32 @@ handmade_game_render :: proc "contextless" (
 	frame_buffer_fill(fb, make_pixel(0xFF00FF))
 
 	assert(pos_is_normalized(state.player_pos))
-	cur_tile, ok := world_get_tile(state.world, state.player_pos.chunk)
-	if !ok {
-		// TODO: ???
-		panic("player out of bounds!")
-	}
 
-	player_tile := linalg.to_int(linalg.floor(state.player_pos.local))
+	window_tile_offset := state.player_pos.tile - WINDOW_CENTER
 
-	row_iter: Tile_Map_Row_Iter
-	for row, row_offset in tile_map_next_row(cur_tile^, &row_iter) {
-		col_iter: Tile_Row_Col_Iter
-		for col, col_offset in tile_row_next_col(row, &col_iter) {
+	for row in 0 ..< i32(WINDOW_TILES_HEIGHT) {
+		for col in 0 ..< i32(WINDOW_TILES_WIDTH) {
+			window_pos := [2]i32{col, row}
+			tile_pos := window_pos + window_tile_offset
+			tile_val, ok := world_get_tile(state.world, tile_pos)
+			if !ok {
+				// Leave the tile blank for now? Wrap the coordinate?
+				continue
+			}
+
 			color: Color
-			if col^ == 0 {
+			if tile_val^ == 0 {
 				color = make_color_grey(0.1)
 			} else {
 				color = make_color_grey(0.8)
 			}
 			// Debug: show current player tile
-			if player_tile[0] == col_offset && player_tile[1] == row_offset {
+			if state.player_pos.tile == tile_pos {
 				color = make_color_grey(1.0)
 			}
 			render_rect_tile(
 				fb,
-				pos = linalg.to_f32([2]int{col_offset, row_offset}),
+				pos = linalg.to_f32(window_pos),
 				size = 1,
 				color = color,
 			)
@@ -425,7 +437,9 @@ handmade_game_render :: proc "contextless" (
 
 	render_rect_tile(
 		fb,
-		pos = state.player_pos.local - {PLAYER_WIDTH / 2, 0},
+		pos = (linalg.to_f32(WINDOW_CENTER) +
+			state.player_pos.local -
+			{PLAYER_WIDTH / 2, 0}),
 		size = {PLAYER_WIDTH, PLAYER_HEIGHT},
 		color = {r = 0.8, g = 0.1, b = 0.1},
 	)
