@@ -38,13 +38,14 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	if !state.initialized {
 		state^ = {
 			initialized = true,
-			world = make_static_world_map(&global_tiles),
 			player_pos = {
 				chunk = {0, 0},
 				local = {f32(TILE_MAP_WIDTH) / 2, f32(TILE_MAP_HEIGHT) / 2},
 			},
 		}
 	}
+	// Re-initialize every time to make it easier to change
+	state.world = make_static_world_map(&global_tiles)
 	return state
 }
 
@@ -62,13 +63,13 @@ handmade_game_update :: proc "contextless" (
 	player_delta: f32 = PLAYER_SPEED * 1e-9 * f32(input.dt_ns)
 
 	if input.keyboard[.W].end_pressed || input.keyboard[.Up].end_pressed {
-		player_dir[1] -= 1
+		player_dir[1] += 1
 	}
 	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed {
 		player_dir[0] -= 1
 	}
 	if input.keyboard[.S].end_pressed || input.keyboard[.Down].end_pressed {
-		player_dir[1] += 1
+		player_dir[1] -= 1
 	}
 	if input.keyboard[.D].end_pressed || input.keyboard[.Right].end_pressed {
 		player_dir[0] += 1
@@ -93,17 +94,21 @@ handmade_game_update :: proc "contextless" (
 	   ) &&
 	   can_move_in_world(
 		   state.world,
-		   offset_pos(new_pos, 0, -PLAYER_COLLISION_HEIGHT_TILES),
+		   offset_pos(new_pos, 0, PLAYER_COLLISION_HEIGHT_TILES),
 	   ) {
 		state.player_pos = normalize_pos(new_pos)
 	}
 }
 
+// World-relative position. Each `[2]T` is a pair of `x` and `y`, with positive
+// going to the right and up.
 World_Pos :: struct {
-	// Index of of the current tile map (in tile-map-sized chunks)
+	// Position of of the current chunk (in tile-map-sized chunks)
 	chunk: [2]i32,
-	// Offset within the tile map
+	// Position in the chunk, relative to the bottom-left of the chunk
 	local: [2]f32,
+	// TODO: Split `local` into an int tile index and a inside-tile position?
+	// TODO: Make `local` relative to the center of the tile map / tile?
 }
 
 normalize_pos :: proc(pos: World_Pos) -> World_Pos {
@@ -420,7 +425,7 @@ handmade_game_render :: proc "contextless" (
 
 	render_rect_tile(
 		fb,
-		pos = state.player_pos.local - {PLAYER_WIDTH / 2, PLAYER_HEIGHT},
+		pos = state.player_pos.local - {PLAYER_WIDTH / 2, 0},
 		size = {PLAYER_WIDTH, PLAYER_HEIGHT},
 		color = {r = 0.8, g = 0.1, b = 0.1},
 	)
@@ -523,8 +528,10 @@ render_rect :: proc(fb: Frame_Buffer, pos, size: [2]f32, color: Color) {
 	x_min := round_clamp_px(pos[0], fb.width)
 	x_max := round_clamp_px(pos[0] + size[0], fb.width)
 
-	y_min := round_clamp_px(pos[1], fb.height)
-	y_max := round_clamp_px(pos[1] + size[1], fb.height)
+	// Flip y axis
+	y_flipped := f32(fb.height) - pos[1]
+	y_max := round_clamp_px(y_flipped, fb.height)
+	y_min := round_clamp_px(y_flipped - size[1], fb.height)
 
 	for y_px in y_min ..< y_max {
 		row := frame_buffer_row(fb, y_px)
