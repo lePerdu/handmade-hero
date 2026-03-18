@@ -404,7 +404,10 @@ handmade_game_render :: proc "contextless" (
 
 	assert(pos_is_normalized(state.player_pos))
 
-	window_tile_offset := state.player_pos.tile - WINDOW_CENTER
+	// `- 1` to account for the screen overlap
+	WINDOW_TILES_DIMS :: [2]i32{WINDOW_TILES_WIDTH - 1, WINDOW_TILES_HEIGHT}
+	window_tile_offset :=
+		(state.player_pos.tile / WINDOW_TILES_DIMS) * WINDOW_TILES_DIMS
 
 	for row in 0 ..< i32(WINDOW_TILES_HEIGHT) {
 		for col in 0 ..< i32(WINDOW_TILES_WIDTH) {
@@ -437,7 +440,7 @@ handmade_game_render :: proc "contextless" (
 
 	render_rect_tile(
 		fb,
-		pos = (linalg.to_f32(WINDOW_CENTER) +
+		pos = (linalg.to_f32(state.player_pos.tile - window_tile_offset) +
 			state.player_pos.local -
 			{PLAYER_WIDTH / 2, 0}),
 		size = {PLAYER_WIDTH, PLAYER_HEIGHT},
