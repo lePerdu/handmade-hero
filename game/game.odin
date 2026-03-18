@@ -38,7 +38,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	if !state.initialized {
 		state^ = {
 			initialized = true,
-			player_pos = {tile = WINDOW_CENTER, local = 0.5},
+			player_pos = {tile = WINDOW_CENTER, local = 0},
 		}
 	}
 	// Re-initialize every time to make it easier to change
@@ -102,9 +102,8 @@ handmade_game_update :: proc "contextless" (
 World_Pos :: struct {
 	// Position of of the tile
 	tile: [2]i32,
-	// Position within the tile, from [0-1)
+	// Position within the tile, relative to its center, from [-0.5, 0.5)
 	local: [2]f32,
-	// TODO: Make `local` relative to the center of the tile?
 	// TODO: Store `local` as f16 when packing?
 }
 
@@ -117,10 +116,11 @@ normalize_pos :: proc(pos: World_Pos) -> World_Pos {
 	//   be always sufficient?)
 	// - Temporarily use fixed point?
 	// - What about wrap-around? Just wrap to the other side of the world?
-	tile_shift := linalg.floor(pos.local)
+	local_from_corner := pos.local + 0.5
+	tile_shift := linalg.floor(local_from_corner)
 	return {
 		tile = pos.tile + linalg.to_i32(tile_shift),
-		local = linalg.fract(pos.local),
+		local = linalg.fract(local_from_corner) - 0.5,
 	}
 }
 
@@ -161,13 +161,19 @@ test_norm_pos :: proc(t: ^testing.T) {
 
 in_bounds :: proc(
 	v: [2]$E,
-	bounds: [2]E,
+	lower_incl: [2]E,
+	upper_excl: [2]E,
 ) -> bool where intrinsics.type_is_numeric(E) {
-	return 0 <= v[0] && v[0] < bounds[0] && 0 <= v[1] && v[1] < bounds[1]
+	return(
+		lower_incl[0] <= v[0] &&
+		v[0] < upper_excl[0] &&
+		lower_incl[1] <= v[1] &&
+		v[1] < upper_excl[1] \
+	)
 }
 
 pos_is_normalized :: proc(pos: World_Pos) -> bool {
-	return in_bounds(pos.local, 1)
+	return in_bounds(pos.local, -0.5, 0.5)
 }
 
 offset_pos :: proc(pos: World_Pos, x, y: f32) -> World_Pos {
@@ -249,7 +255,7 @@ world_get_chunk :: proc(
 	tile_map: ^Tile_Map,
 	ok: bool,
 ) {
-	if !in_bounds(chunk_pos, world.size) do return
+	if !in_bounds(chunk_pos, 0, world.size) do return
 	tile_index := int(chunk_pos[1] * world.size[0] + chunk_pos[0])
 	return &world.tile_maps[tile_index], true
 }
@@ -441,7 +447,8 @@ handmade_game_render :: proc "contextless" (
 	render_rect_tile(
 		fb,
 		pos = (linalg.to_f32(state.player_pos.tile - window_tile_offset) +
-			state.player_pos.local -
+			state.player_pos.local +
+			0.5 -
 			{PLAYER_WIDTH / 2, 0}),
 		size = {PLAYER_WIDTH, PLAYER_HEIGHT},
 		color = {r = 0.8, g = 0.1, b = 0.1},
