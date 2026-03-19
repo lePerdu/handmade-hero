@@ -44,7 +44,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 		mem.arena_init(&state.world_arena, memory.persistent[size_of(State):])
 		gen_world(state)
 		state.player_pos = {
-			tile = WINDOW_CENTER,
+			tile = {WINDOW_TILES_WIDTH / 3, WINDOW_TILES_HEIGHT / 3, 0},
 			local = 0,
 		}
 		state.initialized = true
@@ -59,32 +59,46 @@ gen_world :: proc(state: ^State) {
 	mem.arena_free_all(&state.world_arena)
 	context.allocator = mem.arena_allocator(&state.world_arena)
 
-	map_size := [2]i32 {
+	map_size := [?]i32 {
 		SCREENS_X * WINDOW_TILES_WIDTH / CHUNK_SIZE,
 		SCREENS_Y * WINDOW_TILES_HEIGHT / CHUNK_SIZE,
+		2,
 	}
 	state.world.tile_map = {
 		size = map_size,
-		chunks = make([^]Tile_Chunk, int(map_size[0] * map_size[1])),
+		chunks = make(
+			[^]Tile_Chunk,
+			int(map_size.x * map_size.y * map_size.z),
+		),
 	}
 
-	screen_y: i32 = 0
-	screen_x: i32 = 0
-	door_left, door_right, door_up, door_down: bool
+	screen_x, screen_y, screen_z: i32
+	door_left, door_right, door_bottom, door_top, stair, stair_exit: bool
 	for screen_i in 0 ..< 100 {
 		// TODO: Custom RNG
-		move_right := rand.uint_max(2) == 0
-		if move_right {
+		r := rand.uint_max(3)
+		switch r {
+		case 0:
 			door_right = true
-		} else {
-			door_up = true
+		case 1:
+			door_top = true
+		case 2:
+			// Also add a door
+			if stair_exit {
+				door_right = true
+			} else {
+				stair = true
+			}
 		}
+		door_up := (stair || stair_exit) && screen_z == 0
+		door_down := (stair || stair_exit) && screen_z == 1
 
 		for y in 0 ..< i32(WINDOW_TILES_HEIGHT) {
 			for x in 0 ..< i32(WINDOW_TILES_WIDTH) {
-				pos := [2]i32 {
+				pos := Global_Tile_Pos {
 					screen_x * WINDOW_TILES_WIDTH + x,
 					screen_y * WINDOW_TILES_HEIGHT + y,
+					screen_z,
 				}
 				tile, ok := tile_map_get_tile_or_alloc_chunk(
 					state.world.tile_map,
@@ -93,43 +107,57 @@ gen_world :: proc(state: ^State) {
 				assert(ok)
 				if x == 0 {
 					if y == WINDOW_TILES_HEIGHT / 2 && door_left {
-						tile^ = 0
+						tile^ = .Door
 					} else {
-						tile^ = 1
+						tile^ = .Wall
 					}
 				} else if x == WINDOW_TILES_WIDTH - 1 {
 					if y == WINDOW_TILES_HEIGHT / 2 && door_right {
-						tile^ = 0
+						tile^ = .Door
 					} else {
-						tile^ = 1
+						tile^ = .Wall
 					}
 				} else if y == 0 {
-					if x == WINDOW_TILES_WIDTH / 2 && door_down {
-						tile^ = 0
+					if x == WINDOW_TILES_WIDTH / 2 && door_bottom {
+						tile^ = .Door
 					} else {
-						tile^ = 1
+						tile^ = .Wall
 					}
 				} else if y == WINDOW_TILES_HEIGHT - 1 {
-					if x == WINDOW_TILES_WIDTH / 2 && door_up {
-						tile^ = 0
+					if x == WINDOW_TILES_WIDTH / 2 && door_top {
+						tile^ = .Door
 					} else {
-						tile^ = 1
+						tile^ = .Wall
+					}
+				} else if x == WINDOW_TILES_WIDTH / 2 &&
+				   y == WINDOW_TILES_HEIGHT / 2 {
+					if door_up {
+						tile^ = .Stair_Up
+					} else if door_down {
+						tile^ = .Stair_Down
+					} else {
+						tile^ = .Empty
 					}
 				} else {
-					tile^ = 0
+					tile^ = .Empty
 				}
 			}
 		}
 
 		door_left = door_right
-		door_down = door_up
+		door_bottom = door_top
+		stair_exit = stair
 		door_right = false
-		door_up = false
+		door_top = false
+		stair = false
 
-		if move_right {
+		switch r {
+		case 0:
 			screen_x += 1
-		} else {
+		case 1:
 			screen_y += 1
+		case 2:
+			screen_z = (screen_z + 1) % 2
 		}
 	}
 }
@@ -173,6 +201,7 @@ handmade_game_update :: proc "contextless" (
 	new_pos := state.player_pos
 	new_pos.local += player_dir * coord_delta
 
+	old_tile_pos := state.player_pos.tile
 	if can_move_in_tile_map(
 		   state.world.tile_map,
 		   offset_pos(new_pos, -PLAYER_WIDTH / 2, 0),
@@ -186,6 +215,18 @@ handmade_game_update :: proc "contextless" (
 		   offset_pos(new_pos, 0, PLAYER_COLLISION_HEIGHT_TILES),
 	   ) {
 		state.player_pos = normalize_pos(new_pos)
+	}
+
+	if state.player_pos.tile != old_tile_pos {
+		#partial switch tile_map_get_tile_or_default(
+			state.world.tile_map,
+			state.player_pos.tile,
+		) {
+		case .Stair_Up:
+			state.player_pos.tile.z += 1
+		case .Stair_Down:
+			state.player_pos.tile.z -= 1
+		}
 	}
 }
 
@@ -213,7 +254,7 @@ handmade_game_render :: proc "contextless" (
 	assert(pos_is_normalized(state.player_pos))
 
 	// `- 1` to account for the screen overlap
-	WINDOW_TILES_DIMS :: [2]i32{WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT}
+	WINDOW_TILES_DIMS :: [?]i32{WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT, 1}
 	window_origin := World_Pos {
 		tile = (state.player_pos.tile / WINDOW_TILES_DIMS) * WINDOW_TILES_DIMS,
 		local = 0,
@@ -226,19 +267,34 @@ handmade_game_render :: proc "contextless" (
 
 	for row in 0 ..< i32(WINDOW_TILES_HEIGHT) {
 		for col in 0 ..< i32(WINDOW_TILES_WIDTH) {
-			window_pos := [2]i32{col, row}
+			window_pos := Global_Tile_Pos{col, row, 0}
 			tile_pos := window_pos + window_origin.tile
-			tile_val, ok := tile_map_get_tile(state.world.tile_map, tile_pos)
+			tile_val, ok := tile_map_get_tile_ptr(
+				state.world.tile_map,
+				tile_pos,
+			)
 			if !ok {
 				// Leave the tile blank for now? Wrap the coordinate?
 				continue
 			}
 
 			color: Color
-			if tile_val^ == 0 {
+			switch tile_val^ {
+			case .Empty:
 				color = make_color_grey(0.1)
-			} else {
+			case .Wall:
 				color = make_color_grey(0.8)
+			case .Door:
+				// door
+				color = make_color_grey(0.2)
+			case .Stair_Up:
+				color = Color {
+					g = 0.4,
+				}
+			case .Stair_Down:
+				color = Color {
+					b = 0.4,
+				}
 			}
 			// Debug: show current player tile
 			if state.player_pos.tile == tile_pos {
@@ -246,7 +302,7 @@ handmade_game_render :: proc "contextless" (
 			}
 			render_rect_tile(
 				fb,
-				pos = (linalg.to_f32(window_pos) - window_origin.local),
+				pos = (linalg.to_f32(window_pos.xy) - window_origin.local),
 				size = 1,
 				color = color,
 			)
@@ -255,7 +311,7 @@ handmade_game_render :: proc "contextless" (
 
 	render_rect_tile(
 		fb,
-		pos = (linalg.to_f32(state.player_pos.tile - window_origin.tile) +
+		pos = (linalg.to_f32(state.player_pos.tile - window_origin.tile).xy +
 			state.player_pos.local -
 			window_origin.local +
 			0.5 -

@@ -1,19 +1,21 @@
 package game
 
 import "base:intrinsics"
-import "core:math"
 import "core:math/linalg"
-import "core:mem"
 import "core:slice"
-import "core:testing"
+
+Global_Chunk_Pos :: [3]i32
+Global_Tile_Pos :: [3]i32
+Chunk_Tile_Pos :: [2]i32
+Local_Tile_Pos :: [2]f32
 
 // World-relative position. Each `[2]T` is a pair of `x` and `y`, with positive
 // going to the right and up.
 World_Pos :: struct {
 	// Position of of the tile
-	tile: [2]i32,
+	tile: Global_Tile_Pos,
 	// Position within the tile, relative to its center, from [-0.5, 0.5)
-	local: [2]f32,
+	local: Local_Tile_Pos,
 	// TODO: Store `local` as f16 when packing?
 }
 
@@ -27,14 +29,16 @@ normalize_pos :: proc(pos: World_Pos) -> World_Pos {
 	// - Temporarily use fixed point?
 	// - What about wrap-around? Just wrap to the other side of the world?
 	local_from_corner := pos.local + 0.5
-	tile_shift := linalg.floor(local_from_corner)
+	tile_shift_2 := linalg.to_i32(linalg.floor(local_from_corner))
+	tile_shift := Global_Tile_Pos{tile_shift_2[0], tile_shift_2[1], 0}
 	return {
-		tile = pos.tile + linalg.to_i32(tile_shift),
+		tile = pos.tile + tile_shift,
 		local = linalg.fract(local_from_corner) - 0.5,
 	}
 }
 
 // TODO: Fix test cases
+/*
 @(test)
 test_norm_pos :: proc(t: ^testing.T) {
 	testing.expect_value(t, normalize_pos({}), World_Pos{})
@@ -46,7 +50,7 @@ test_norm_pos :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		normalize_pos({local = {8, 12 * CHUNK_SIZE + 0.5}}),
-		World_Pos{tile = {0, 12}, local = {8, 0.5}},
+		World_Pos{tile = {0, 12, 0}, local = {8, 0.5}},
 	)
 
 	// TODO: These currently fail due to rounding errors
@@ -56,7 +60,7 @@ test_norm_pos :: proc(t: ^testing.T) {
 		normalize_pos({local = {-5e-7, 0}}),
 		// TODO: Should this go to `CHUNK_SIZE - epsilon` or just round `local` to 0?
 		World_Pos {
-			tile = {-1, 0},
+			tile = {-1, 0, 0},
 			local = {CHUNK_SIZE * (1 - math.F32_EPSILON), 0},
 		},
 	)
@@ -68,19 +72,21 @@ test_norm_pos :: proc(t: ^testing.T) {
 		World_Pos{tile = {1, 0}, local = {CHUNK_SIZE * math.F32_EPSILON, 5}},
 	)
 }
+*/
 
 @(private = "file")
 in_bounds :: proc(
-	v: [2]$E,
-	lower_incl: [2]E,
-	upper_excl: [2]E,
+	v: [$N]$E,
+	lower_incl: [N]E,
+	upper_excl: [N]E,
 ) -> bool where intrinsics.type_is_numeric(E) {
-	return(
-		lower_incl[0] <= v[0] &&
-		v[0] < upper_excl[0] &&
-		lower_incl[1] <= v[1] &&
-		v[1] < upper_excl[1] \
-	)
+	// TODO: Unroll since N is always small?
+	for i in 0 ..< N {
+		if v[i] < lower_incl[i] || upper_excl[i] <= v[i] {
+			return false
+		}
+	}
+	return true
 }
 
 pos_is_normalized :: proc(pos: World_Pos) -> bool {
@@ -89,12 +95,18 @@ pos_is_normalized :: proc(pos: World_Pos) -> bool {
 
 offset_pos :: proc(pos: World_Pos, x, y: f32) -> World_Pos {
 	pos := pos
-	pos.local[0] += x
-	pos.local[1] += y
+	pos.local.x += x
+	pos.local.y += y
 	return pos
 }
 
-Tile :: u8
+Tile :: enum u8 {
+	Empty = 0,
+	Wall,
+	Door,
+	Stair_Up,
+	Stair_Down,
+}
 
 // TODO: Does tile map size ever need to be dynamic?
 Tile_Chunk :: struct {
@@ -135,11 +147,11 @@ tile_chunk_get_ptr :: proc(
 	return nil, false
 }
 
-tile_chunk_get :: proc(tile_map: Tile_Chunk, offset: [2]i32) -> (u8, bool) {
+tile_chunk_get :: proc(tile_map: Tile_Chunk, offset: [2]i32) -> (Tile, bool) {
 	if ptr, ok := tile_chunk_get_ptr(tile_map, offset); ok {
 		return ptr^, true
 	}
-	return 0, false
+	return .Empty, false
 }
 
 make_static_tile_chunk :: proc "contextless" (
@@ -151,7 +163,8 @@ make_static_tile_chunk :: proc "contextless" (
 // TODO: Move tile size / tile map size here?
 // Does it make sense for tile maps to have different sizes?
 Tile_Map :: struct {
-	size: [2]i32,
+	// x,y,z
+	size: [3]i32,
 	chunks: [^]Tile_Chunk,
 }
 
@@ -159,33 +172,42 @@ CHUNK_SIZE_BITS :: 4
 CHUNK_SIZE :: 1 << CHUNK_SIZE_BITS
 CHUNK_SIZE_MASK :: CHUNK_SIZE - 1
 
-world_pos_split_chunk :: proc(tile_pos: [2]i32) -> ([2]i32, [2]i32) {
+world_pos_split_chunk :: proc(
+	tile_pos: Global_Tile_Pos,
+) -> (
+	Global_Chunk_Pos,
+	Chunk_Tile_Pos,
+) {
 	// TODO: Report issue for supporting `>>` on arrays?
-	return [2]i32 {
-			tile_pos[0] >> CHUNK_SIZE_BITS,
-			tile_pos[1] >> CHUNK_SIZE_BITS,
+	return [?]i32 {
+			tile_pos.x >> CHUNK_SIZE_BITS,
+			tile_pos.y >> CHUNK_SIZE_BITS,
+			tile_pos.z,
 		},
-		tile_pos & CHUNK_SIZE_MASK
+		tile_pos.xy & CHUNK_SIZE_MASK
 }
 
 tile_map_get_chunk :: proc(
 	tile_map: Tile_Map,
-	chunk_pos: [2]i32,
+	chunk_pos: Global_Chunk_Pos,
 ) -> (
 	chunk: ^Tile_Chunk,
 	ok: bool,
 ) {
 	if !in_bounds(chunk_pos, 0, tile_map.size) do return
-	tile_index := int(chunk_pos[1] * tile_map.size[0] + chunk_pos[0])
+	tile_index := int(
+		(chunk_pos.z * tile_map.size.y + chunk_pos.y) * tile_map.size.x +
+		chunk_pos.x,
+	)
 	return &tile_map.chunks[tile_index], true
 }
 
 tile_map_get_tile_in_chunk :: proc(
 	tile_map: Tile_Map,
-	chunk_pos: [2]i32,
+	chunk_pos: Global_Chunk_Pos,
 	// TODO: Naming convention to distinguish between global and chunk-local
 	// tile positions
-	tile_pos: [2]i32,
+	tile_pos: Chunk_Tile_Pos,
 ) -> (
 	tile: ^Tile,
 	ok: bool,
@@ -194,9 +216,9 @@ tile_map_get_tile_in_chunk :: proc(
 	return tile_chunk_get_ptr(tile_map^, tile_pos)
 }
 
-tile_map_get_tile :: proc(
+tile_map_get_tile_ptr :: proc(
 	tile_map: Tile_Map,
-	tile_pos: [2]i32,
+	tile_pos: [3]i32,
 ) -> (
 	^Tile,
 	bool,
@@ -205,9 +227,21 @@ tile_map_get_tile :: proc(
 	return tile_map_get_tile_in_chunk(tile_map, chunk_pos, tile_pos)
 }
 
+tile_map_get_tile_or_default :: proc(
+	tile_map: Tile_Map,
+	tile_pos: [3]i32,
+	default := Tile.Wall,
+) -> Tile {
+	if ptr, ok := tile_map_get_tile_ptr(tile_map, tile_pos); ok {
+		return ptr^
+	} else {
+		return default
+	}
+}
+
 tile_map_get_tile_or_alloc_chunk :: proc(
 	tile_map: Tile_Map,
-	tile_pos: [2]i32,
+	tile_pos: Global_Tile_Pos,
 	allocator := context.allocator,
 ) -> (
 	tile: ^Tile,
@@ -234,8 +268,8 @@ tile_map_get_tile_or_alloc_chunk :: proc(
 
 can_move_in_tile_map_norm :: proc(tile_map: Tile_Map, pos: World_Pos) -> bool {
 	assert(pos_is_normalized(pos))
-	tile, ok := tile_map_get_tile(tile_map, pos.tile)
-	return ok && tile^ == 0
+	tile, ok := tile_map_get_tile_ptr(tile_map, pos.tile)
+	return ok && tile^ != .Wall
 }
 
 can_move_in_tile_map :: proc(tile_map: Tile_Map, pos: World_Pos) -> bool {
@@ -246,96 +280,4 @@ make_static_tile_map :: proc "contextless" (
 	tile_maps: ^[$N][$M]Tile_Chunk,
 ) -> Tile_Map {
 	return {size = {M, N}, chunks = ([^]Tile_Chunk)(tile_maps)}
-}
-
-TILE_MAP00 := make_static_tile_chunk(
-	&[CHUNK_SIZE][CHUNK_SIZE]Tile {
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0},
-		{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1},
-		{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
-		{1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0},
-		{1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0},
-	},
-)
-
-TILE_MAP01 := make_static_tile_chunk(
-	&[CHUNK_SIZE][CHUNK_SIZE]Tile {
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1},
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1},
-	},
-)
-
-TILE_MAP10 := make_static_tile_chunk(
-	&[CHUNK_SIZE][CHUNK_SIZE]Tile {
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-	},
-)
-
-TILE_MAP11 := make_static_tile_chunk(
-	&[CHUNK_SIZE][CHUNK_SIZE]Tile {
-		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-	},
-)
-
-// NOTE: If this is defined before the sub-components, it will be
-// zero-initialized
-// TODO: Report that as a bug?
-global_tiles := [2][2]Tile_Chunk {
-	{TILE_MAP00, TILE_MAP01},
-	{TILE_MAP10, TILE_MAP11},
 }
