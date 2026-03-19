@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:math"
 import "core:math/linalg"
+import "core:math/rand"
 import "core:mem"
 import "core:slice"
 
@@ -52,9 +53,10 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 }
 
 gen_world :: proc(state: ^State) {
-	SCREENS_X :: 32
-	SCREENS_Y :: 32
+	SCREENS_X :: 128
+	SCREENS_Y :: 128
 
+	mem.arena_free_all(&state.world_arena)
 	context.allocator = mem.arena_allocator(&state.world_arena)
 
 	map_size := [2]i32 {
@@ -65,34 +67,69 @@ gen_world :: proc(state: ^State) {
 		size = map_size,
 		chunks = make([^]Tile_Chunk, int(map_size[0] * map_size[1])),
 	}
-	for chunk_y in 0 ..< map_size[1] {
-		for chunk_x in 0 ..< map_size[0] {
-			chunk, ok := tile_map_get_chunk(
-				state.world.tile_map,
-				{chunk_x, chunk_y},
-			)
-			assert(ok)
-			chunk.tiles = new(type_of(chunk.tiles^))
-		}
-	}
 
-	for screen_y in 0 ..< i32(SCREENS_Y) {
-		for screen_x in 0 ..< i32(SCREENS_X) {
-			for y in 0 ..< i32(WINDOW_TILES_HEIGHT) {
-				for x in 0 ..< i32(WINDOW_TILES_WIDTH) {
-					pos := [2]i32 {
-						screen_x * WINDOW_TILES_WIDTH + x,
-						screen_y * WINDOW_TILES_HEIGHT + y,
-					}
-					tile, ok := tile_map_get_tile(state.world.tile_map, pos)
-					assert(ok)
-					if x % 7 == y + screen_x % 5 + screen_y % 3 {
-						tile^ = 1
-					} else {
+	screen_y: i32 = 0
+	screen_x: i32 = 0
+	door_left, door_right, door_up, door_down: bool
+	for screen_i in 0 ..< 100 {
+		// TODO: Custom RNG
+		move_right := rand.uint_max(2) == 0
+		if move_right {
+			door_right = true
+		} else {
+			door_up = true
+		}
+
+		for y in 0 ..< i32(WINDOW_TILES_HEIGHT) {
+			for x in 0 ..< i32(WINDOW_TILES_WIDTH) {
+				pos := [2]i32 {
+					screen_x * WINDOW_TILES_WIDTH + x,
+					screen_y * WINDOW_TILES_HEIGHT + y,
+				}
+				tile, ok := tile_map_get_tile_or_alloc_chunk(
+					state.world.tile_map,
+					pos,
+				)
+				assert(ok)
+				if x == 0 {
+					if y == WINDOW_TILES_HEIGHT / 2 && door_left {
 						tile^ = 0
+					} else {
+						tile^ = 1
 					}
+				} else if x == WINDOW_TILES_WIDTH - 1 {
+					if y == WINDOW_TILES_HEIGHT / 2 && door_right {
+						tile^ = 0
+					} else {
+						tile^ = 1
+					}
+				} else if y == 0 {
+					if x == WINDOW_TILES_WIDTH / 2 && door_down {
+						tile^ = 0
+					} else {
+						tile^ = 1
+					}
+				} else if y == WINDOW_TILES_HEIGHT - 1 {
+					if x == WINDOW_TILES_WIDTH / 2 && door_up {
+						tile^ = 0
+					} else {
+						tile^ = 1
+					}
+				} else {
+					tile^ = 0
 				}
 			}
+		}
+
+		door_left = door_right
+		door_down = door_up
+		door_right = false
+		door_up = false
+
+		if move_right {
+			screen_x += 1
+		} else {
+			screen_y += 1
 		}
 	}
 }
@@ -109,6 +146,10 @@ handmade_game_update :: proc "contextless" (
 	player_dir: [2]f32
 	PLAYER_SPEED: f32 : 4 // tile/sec
 	player_delta: f32 = PLAYER_SPEED * 1e-9 * f32(input.dt_ns)
+
+	if input.keyboard[.Space].end_pressed {
+		player_delta *= 3
+	}
 
 	if input.keyboard[.W].end_pressed || input.keyboard[.Up].end_pressed {
 		player_dir[1] += 1
@@ -172,14 +213,21 @@ handmade_game_render :: proc "contextless" (
 	assert(pos_is_normalized(state.player_pos))
 
 	// `- 1` to account for the screen overlap
-	WINDOW_TILES_DIMS :: [2]i32{WINDOW_TILES_WIDTH - 1, WINDOW_TILES_HEIGHT}
-	window_tile_offset :=
-		(state.player_pos.tile / WINDOW_TILES_DIMS) * WINDOW_TILES_DIMS
+	WINDOW_TILES_DIMS :: [2]i32{WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT}
+	window_origin := World_Pos {
+		tile = (state.player_pos.tile / WINDOW_TILES_DIMS) * WINDOW_TILES_DIMS,
+		local = 0,
+	}
+	// Scroll screen with player
+	// window_origin = World_Pos {
+	// 	tile = state.player_pos.tile - {WINDOW_TILES_WIDTH / 2, WINDOW_TILES_HEIGHT / 2} ,
+	// 	local = state.player_pos.local,
+	// }
 
 	for row in 0 ..< i32(WINDOW_TILES_HEIGHT) {
 		for col in 0 ..< i32(WINDOW_TILES_WIDTH) {
 			window_pos := [2]i32{col, row}
-			tile_pos := window_pos + window_tile_offset
+			tile_pos := window_pos + window_origin.tile
 			tile_val, ok := tile_map_get_tile(state.world.tile_map, tile_pos)
 			if !ok {
 				// Leave the tile blank for now? Wrap the coordinate?
@@ -198,7 +246,7 @@ handmade_game_render :: proc "contextless" (
 			}
 			render_rect_tile(
 				fb,
-				pos = linalg.to_f32(window_pos),
+				pos = (linalg.to_f32(window_pos) - window_origin.local),
 				size = 1,
 				color = color,
 			)
@@ -207,8 +255,9 @@ handmade_game_render :: proc "contextless" (
 
 	render_rect_tile(
 		fb,
-		pos = (linalg.to_f32(state.player_pos.tile - window_tile_offset) +
-			state.player_pos.local +
+		pos = (linalg.to_f32(state.player_pos.tile - window_origin.tile) +
+			state.player_pos.local -
+			window_origin.local +
 			0.5 -
 			{PLAYER_WIDTH / 2, 0}),
 		size = {PLAYER_WIDTH, PLAYER_HEIGHT},

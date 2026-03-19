@@ -105,13 +105,16 @@ Tile_Chunk :: struct {
 
 Tile_Row :: ^[CHUNK_SIZE]Tile
 
-tile_map_get_row :: proc(
+tile_chunk_get_row :: proc(
 	tile_map: Tile_Chunk,
 	y_offset: i32,
 ) -> (
 	Tile_Row,
 	bool,
 ) {
+	if tile_map.tiles == nil {
+		return nil, false
+	}
 	return slice.get_ptr(tile_map.tiles[:], int(y_offset))
 }
 
@@ -119,21 +122,21 @@ tile_row_get_ptr :: proc(tile_row: Tile_Row, x_offset: i32) -> (^Tile, bool) {
 	return slice.get_ptr(tile_row[:], int(x_offset))
 }
 
-tile_map_get_ptr :: proc(
+tile_chunk_get_ptr :: proc(
 	tile_map: Tile_Chunk,
 	offset: [2]i32,
 ) -> (
 	^Tile,
 	bool,
 ) {
-	if row, ok := tile_map_get_row(tile_map, offset[1]); ok {
+	if row, ok := tile_chunk_get_row(tile_map, offset[1]); ok {
 		return tile_row_get_ptr(row, offset[0])
 	}
 	return nil, false
 }
 
-tile_map_get :: proc(tile_map: Tile_Chunk, offset: [2]i32) -> (u8, bool) {
-	if ptr, ok := tile_map_get_ptr(tile_map, offset); ok {
+tile_chunk_get :: proc(tile_map: Tile_Chunk, offset: [2]i32) -> (u8, bool) {
+	if ptr, ok := tile_chunk_get_ptr(tile_map, offset); ok {
 		return ptr^, true
 	}
 	return 0, false
@@ -188,7 +191,7 @@ tile_map_get_tile_in_chunk :: proc(
 	ok: bool,
 ) {
 	tile_map := tile_map_get_chunk(tile_map, chunk_pos) or_return
-	return tile_map_get_ptr(tile_map^, tile_pos)
+	return tile_chunk_get_ptr(tile_map^, tile_pos)
 }
 
 tile_map_get_tile :: proc(
@@ -200,6 +203,33 @@ tile_map_get_tile :: proc(
 ) {
 	chunk_pos, tile_pos := world_pos_split_chunk(tile_pos)
 	return tile_map_get_tile_in_chunk(tile_map, chunk_pos, tile_pos)
+}
+
+tile_map_get_tile_or_alloc_chunk :: proc(
+	tile_map: Tile_Map,
+	tile_pos: [2]i32,
+	allocator := context.allocator,
+) -> (
+	tile: ^Tile,
+	ok: bool,
+) {
+	chunk_pos, tile_pos := world_pos_split_chunk(tile_pos)
+	if tile, ok = tile_map_get_tile_in_chunk(tile_map, chunk_pos, tile_pos);
+	   ok {
+		return
+	}
+
+	chunk: ^Tile_Chunk
+	if chunk, ok = tile_map_get_chunk(tile_map, chunk_pos); !ok {
+		return
+	}
+
+	if new_tiles, err := new(type_of(chunk.tiles^)); err == nil {
+		chunk.tiles = new_tiles
+	} else {
+		return nil, false
+	}
+	return tile_chunk_get_ptr(chunk^, tile_pos)
 }
 
 can_move_in_tile_map_norm :: proc(tile_map: Tile_Map, pos: World_Pos) -> bool {
