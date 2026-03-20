@@ -9,6 +9,14 @@ Memory :: struct {
 	persistent: []byte,
 	// TODO: Replace with virtual mem arena?
 	temporary: []byte,
+	debug: struct {
+		data: rawptr,
+		read_file: #type proc "contextless" (
+			data: rawptr,
+			filename: string,
+		) -> []byte,
+		free_file: #type proc "contextless" (data: rawptr, contents: []byte),
+	},
 }
 
 // TODO: Can these use the odin calling convention even when coming from a

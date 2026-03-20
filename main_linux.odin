@@ -1,6 +1,7 @@
 package main
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:c"
 import "core:dynlib"
 import "core:fmt"
@@ -26,11 +27,13 @@ State :: struct {
 	paused: bool,
 	game_memory: game_api.Memory,
 	exec_dir: string,
+	proj_dir: string,
 	data_dir: string,
 	dynlib_path: string,
 	dynlib_load_mod_time: time.Time,
 	game_symbols: game_api.Symbol_Table,
 	recorder: Recorder,
+	debug_context: runtime.Context,
 }
 
 Recorder :: struct {
@@ -81,6 +84,10 @@ main :: proc() {
 	} else {
 		log.panic("failed to allocate game memory", err)
 	}
+	state.debug_context = context
+	state.game_memory.debug.data = &state
+	state.game_memory.debug.read_file = debug_read_file
+	state.game_memory.debug.free_file = debug_free_file
 
 	// Start with dummy symbols
 	state.game_symbols = game_api.dummy_symbol_table
@@ -101,10 +108,15 @@ setup_paths :: proc(state: ^State) {
 		log.panic("failed to get executable directory:", err)
 	}
 
-	if path, err := filepath.join(
-		{state.exec_dir, "..", "data"},
-		context.allocator,
-	); err == nil {
+	if path, err := filepath.join({state.exec_dir, ".."}, context.allocator);
+	   err == nil {
+		state.proj_dir = path
+	} else {
+		log.panic("failed to get project directory:", err)
+	}
+
+	if path, err := filepath.join({state.proj_dir, "data"}, context.allocator);
+	   err == nil {
 		state.data_dir = path
 	} else {
 		log.panic("failed to get data directory:", err)
@@ -2070,3 +2082,39 @@ get_perf_counter_cpu_ns :: proc() -> i64 {
 }
 
 get_perf_counter_cpu_cycles :: intrinsics.read_cycle_counter
+
+debug_read_file :: proc "contextless" (
+	state_raw: rawptr,
+	filename: string,
+) -> []byte {
+	state := (^State)(state_raw)
+	context = state.debug_context
+
+	full_path: string
+	if path, err := filepath.join(
+		{state.proj_dir, filename},
+		context.temp_allocator,
+	); err == nil {
+		full_path = path
+	} else {
+		log.panicf(
+			"failed to build debug file path: {}/{}: {}",
+			state.proj_dir,
+			filename,
+			err,
+		)
+	}
+
+	if contents, err := os.read_entire_file(full_path, context.allocator);
+	   err == nil {
+		return contents
+	} else {
+		log.panicf("failed to read debug file: {}: {}", full_path, err)
+	}
+}
+
+debug_free_file :: proc "contextless" (state_raw: rawptr, contents: []byte) {
+	state := (^State)(state_raw)
+	context = state.debug_context
+	delete(contents)
+}

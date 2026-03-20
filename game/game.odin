@@ -18,6 +18,10 @@ State :: struct {
 	world: World,
 	player_pos: World_Pos,
 	world_arena: mem.Arena,
+	background: Bmp_Image,
+	player_head: Bmp_Image,
+	player_torso: Bmp_Image,
+	player_cape: Bmp_Image,
 }
 
 World :: struct {
@@ -37,6 +41,17 @@ get_game_context :: proc "contextless" (
 	return context
 }
 
+debug_load_bmp :: proc(memory: api.Memory, file_path: string) -> Bmp_Image {
+	contents := memory.debug.read_file(memory.debug.data, file_path)
+
+	background: Bmp_Image
+	if img, ok := load_bmp(contents); ok {
+		return img
+	} else {
+		panic("failed to load background")
+	}
+}
+
 get_game_state :: proc(memory: api.Memory) -> ^State {
 	assert(len(memory.persistent) >= size_of(State))
 	state := (^State)(raw_data(memory.persistent))
@@ -47,6 +62,24 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 			tile = {WINDOW_TILES_WIDTH / 3, WINDOW_TILES_HEIGHT / 3, 0},
 			local = 0,
 		}
+
+		state.background = debug_load_bmp(
+			memory,
+			"assets/early_data/test/test_background.bmp",
+		)
+		state.player_head = debug_load_bmp(
+			memory,
+			"assets/early_data/test/test_hero_front_head.bmp",
+		)
+		state.player_cape = debug_load_bmp(
+			memory,
+			"assets/early_data/test/test_hero_front_cape.bmp",
+		)
+		state.player_torso = debug_load_bmp(
+			memory,
+			"assets/early_data/test/test_hero_front_torso.bmp",
+		)
+
 		state.initialized = true
 	}
 	return state
@@ -241,6 +274,136 @@ WINDOW_TILES_WIDTH :: 17
 WINDOW_TILES_HEIGHT :: 9
 WINDOW_CENTER :: [2]i32{WINDOW_TILES_WIDTH / 2, WINDOW_TILES_HEIGHT / 2}
 
+Bmp_Header :: struct #packed {
+	id: [2]u8,
+	size: u32le,
+	_reserved1: u16le,
+	_reserved2: u16le,
+	bitmap_offset: u32le,
+}
+#assert(size_of(Bmp_Header) == 14)
+
+Dib_Bitmap_Info_Header :: struct #packed {
+	// Should be >= 40
+	header_size: u32le,
+	bitmap_width: i32le,
+	// Positive: bottom->top
+	// Negative: top->bottom
+	bitmap_height: i32le,
+	color_planes: u16le,
+	bits_per_pixel: u16le,
+	compression: Compression_Method,
+	// 0 for RGB
+	image_size: u32le,
+	horiz_resolution: u32le,
+	vert_resolution: u32le,
+	colors: u32le,
+	important_colors: u32le,
+	// v4
+	// RGBA
+	masks: [4]u32le,
+	cs_type: u32le,
+	endpoints: [3][3]u32le,
+	gamma: [3][2]u16le,
+	// v5
+	intent: u32le,
+	profile_data: u32le,
+	profile_size: u32le,
+	_reserved: u32le,
+}
+
+Compression_Method :: enum u32le {
+	Rgb             = 0,
+	Rle8            = 1,
+	Rle4            = 2,
+	Bitfields       = 3,
+	Jpeg            = 4,
+	Png             = 5,
+	Alpha_Bitfields = 6,
+	Cmyk            = 11,
+	Cmyk_Rle8       = 12,
+	Cmyk_Rle4       = 13,
+}
+
+// TODO: Use same structure for dest frame buffer?
+Bmp_Image :: struct {
+	width: u32,
+	height: u32,
+	stride: u32,
+	format: Bmp_Format,
+	pixels: rawptr,
+}
+
+Bmp_Format :: enum {
+	Rgba8le,
+	Argb8le,
+}
+
+Bmp_Pixel_Rgba8le :: struct #packed {
+	a, b, g, r: u8,
+}
+BMP_RGBA8LE_MASK :: [4]u32le{0xFF000000, 0x00FF0000, 0x0000FF00, 0x000000FF}
+
+Bmp_Pixel_Argb8le :: struct #packed {
+	b, g, r, a: u8,
+}
+BMP_ARGB8LE_MASK :: [4]u32le{0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000}
+
+load_bmp :: proc(contents: []byte) -> (image: Bmp_Image, ok: bool) {
+	if len(contents) < size_of(Bmp_Header) {
+		ok = false
+		return
+	}
+
+	// TODO: Replace asserts with error returns
+	bmp_header := (^Bmp_Header)(&contents[0])
+	assert(bmp_header.id == "BM")
+	assert(bmp_header.bitmap_offset <= bmp_header.size)
+
+	info_header := (^Dib_Bitmap_Info_Header)(&contents[size_of(bmp_header^)])
+	assert(info_header.header_size >= size_of(info_header^))
+	assert(info_header.color_planes == 1)
+	assert(info_header.bits_per_pixel == 32)
+	assert(info_header.colors == 0)
+
+	// Round up to nearest 32-bit chunk
+	stride_bytes :=
+		((u32(info_header.bits_per_pixel) * u32(info_header.bitmap_width) +
+				31) &
+			~u32(31)) >>
+		3
+	assert(
+		u32(info_header.image_size) ==
+		stride_bytes * u32(abs(info_header.bitmap_height)),
+	)
+
+	// TODO: Support more dynamic formats
+	#partial switch info_header.compression {
+	case .Bitfields:
+		if info_header.masks.rgb == BMP_RGBA8LE_MASK.rgb {
+			image.format = .Rgba8le
+		} else if info_header.masks.rgb == BMP_ARGB8LE_MASK.rgb {
+			image.format = .Argb8le
+		} else {
+			panic("unsupported bitfields format")
+		}
+	// case .Alpha_Bitfields:
+	// 	assert(info_header.masks == BMP_RGBA8LE_MASK)
+	case:
+		panic("unsupported BMP format")
+	}
+
+	assert(info_header.bitmap_width >= 0)
+	// TODO: support flipped order
+	assert(info_header.bitmap_height >= 0)
+	image.width = u32(info_header.bitmap_width)
+	image.height = u32(info_header.bitmap_height)
+	image.stride = stride_bytes / 4
+	image.pixels = &contents[bmp_header.bitmap_offset]
+	ok = true
+	return
+}
+
 @(export)
 handmade_game_render :: proc "contextless" (
 	memory: api.Memory,
@@ -250,6 +413,8 @@ handmade_game_render :: proc "contextless" (
 	state := get_game_state(memory)
 
 	frame_buffer_fill(fb, make_pixel(0xFF00FF))
+
+	render_bmp(fb, {0, 0}, state.background)
 
 	assert(pos_is_normalized(state.player_pos))
 
@@ -281,25 +446,25 @@ handmade_game_render :: proc "contextless" (
 			color: Color
 			switch tile_val^ {
 			case .Empty:
-				color = make_color_grey(0.1)
+				// TODO: How to continue out of a switch?
+				color = make_color(0.1)
 			case .Wall:
-				color = make_color_grey(0.8)
+				color = make_color(0.8)
 			case .Door:
 				// door
-				color = make_color_grey(0.2)
+				color = make_color(0.2)
 			case .Stair_Up:
-				color = Color {
-					g = 0.4,
-				}
+				color = make_color(r = 0.0, g = 0.4, b = 0.0)
 			case .Stair_Down:
-				color = Color {
-					b = 0.4,
-				}
+				color = make_color(r = 0.0, g = 0.0, b = 0.4)
 			}
 			// Debug: show current player tile
 			if state.player_pos.tile == tile_pos {
-				color = make_color_grey(1.0)
+				color = make_color(1.0)
+			} else if tile_val^ == .Empty {
+				continue
 			}
+
 			render_rect_tile(
 				fb,
 				pos = (linalg.to_f32(window_pos.xy) - window_origin.local),
@@ -309,26 +474,46 @@ handmade_game_render :: proc "contextless" (
 		}
 	}
 
-	render_rect_tile(
-		fb,
-		pos = (linalg.to_f32(state.player_pos.tile - window_origin.tile).xy +
-			state.player_pos.local -
-			window_origin.local +
-			0.5 -
-			{PLAYER_WIDTH / 2, 0}),
-		size = {PLAYER_WIDTH, PLAYER_HEIGHT},
-		color = {r = 0.8, g = 0.1, b = 0.1},
-	)
+	// TODO: Calc render width/height based on image size? Scale bitmaps to fit
+	// pre-defined dimensionts?
+	player_render_pos :=
+		(linalg.to_f32(state.player_pos.tile - window_origin.tile).xy +
+				state.player_pos.local -
+				window_origin.local) *
+			TILE_SIZE_PX -
+		{f32(state.player_torso.width) / 2, 0}
+	render_bmp(fb, player_render_pos, state.player_torso)
+	render_bmp(fb, player_render_pos, state.player_cape)
+	render_bmp(fb, player_render_pos, state.player_head)
+
+	// render_rect_tile(
+	// 	fb,
+	// 	pos = (linalg.to_f32(state.player_pos.tile - window_origin.tile).xy +
+	// 		state.player_pos.local -
+	// 		window_origin.local +
+	// 		0.5 -
+	// 		{PLAYER_WIDTH / 2, 0}),
+	// 	size = {PLAYER_WIDTH, PLAYER_HEIGHT},
+	// 	color = make_color(0.8, 0.1, 0.1),
+	// )
 }
 
-Color :: struct {
-	r, g, b: f32,
+Color :: [3]f32
+
+make_color :: proc {
+	make_color_rgb,
+	make_color_grey,
+}
+
+make_color_rgb :: proc(r, g, b: f32) -> Color {
+	return {r, g, b}
 }
 
 make_color_grey :: proc(v: f32) -> Color {
-	return {r = v, g = v, b = v}
+	return v
 }
 
+// Xrgb8, little-endian pixel format
 Pixel :: struct #packed {
 	b, g, r, _: u8,
 }
@@ -404,28 +589,46 @@ frame_buffer_fill :: proc(fb: Frame_Buffer, p: Pixel) {
 	}
 }
 
-round_px :: #force_inline proc(v: f32) -> int {
-	return int(math.round(v))
+clamp_size :: #force_inline proc(v: [2]int, size: [2]int) -> [2]int {
+	return {clamp(v.x, 0, size.x), clamp(v.y, 0, size.y)}
 }
 
-round_clamp_px :: #force_inline proc(v: f32, #any_int fb_dim: int) -> int {
-	return clamp(round_px(v), 0, fb_dim)
+Mapped_Region :: struct {
+	in_offset: [2]int,
+	out_offset: [2]int,
+	size: [2]int,
+}
+
+map_px_region :: proc(fb: Frame_Buffer, pos, size: [2]int) -> Mapped_Region {
+	fb_size := [2]int{int(fb.width), int(fb.height)}
+	clipped_in_min := clamp_size(pos, fb_size)
+	clipped_in_max := clamp_size(pos + size, fb_size)
+
+	return {
+		in_offset = clipped_in_min - pos,
+		out_offset = {clipped_in_min.x, fb_size.y - 1 - clipped_in_min.y},
+		size = clipped_in_max - clipped_in_min,
+	}
+}
+
+round_int :: proc(pos: [$N]f32) -> [N]int {
+	return linalg.to_int(linalg.round(pos))
+}
+
+round_px_region :: proc(pos, size: [2]f32) -> (pos_px, size_px: [2]int) {
+	min_px := round_int(pos)
+	max_px := round_int(pos + size)
+	return min_px, max_px - min_px
 }
 
 render_rect :: proc(fb: Frame_Buffer, pos, size: [2]f32, color: Color) {
 	pixel := make_pixel(color)
+	pos_px, size_px := round_px_region(pos, size)
+	region := map_px_region(fb, pos_px, size_px)
 
-	x_min := round_clamp_px(pos[0], fb.width)
-	x_max := round_clamp_px(pos[0] + size[0], fb.width)
-
-	// Flip y axis
-	y_flipped := f32(fb.height) - pos[1]
-	y_max := round_clamp_px(y_flipped, fb.height)
-	y_min := round_clamp_px(y_flipped - size[1], fb.height)
-
-	for y_px in y_min ..< y_max {
-		row := frame_buffer_row(fb, y_px)
-		row_part := row[x_min:x_max]
+	for y in 0 ..< region.size.y {
+		row := frame_buffer_row(fb, region.out_offset.y - y)
+		row_part := row[region.out_offset.x:][:region.size.x]
 		slice.fill(row_part, pixel)
 	}
 }
@@ -437,6 +640,43 @@ render_rect_tile :: proc(fb: Frame_Buffer, pos, size: [2]f32, color: Color) {
 		size = size * TILE_SIZE_PX,
 		color = color,
 	)
+}
+
+render_bmp :: proc(fb: Frame_Buffer, pos: [2]f32, image: Bmp_Image) {
+	region := map_px_region(
+		fb,
+		round_int(pos),
+		{int(image.width), int(image.height)},
+	)
+
+	for y in 0 ..< region.size.y {
+		img_y := region.in_offset.y + y
+		fb_row := frame_buffer_row(fb, region.out_offset.y - y)
+		for x in 0 ..< region.size.x {
+			img_x := region.in_offset.x + x
+			px_index := img_y * int(image.stride) + img_x
+			fb_px: Pixel
+			switch image.format {
+			case .Rgba8le:
+				bmp_px := ([^]Bmp_Pixel_Rgba8le)(image.pixels)[px_index]
+				fb_px = {
+					r = bmp_px.r,
+					g = bmp_px.g,
+					b = bmp_px.b,
+				}
+			case .Argb8le:
+				bmp_px := ([^]Bmp_Pixel_Argb8le)(image.pixels)[px_index]
+				fb_px = {
+					r = bmp_px.r,
+					g = bmp_px.g,
+					b = bmp_px.b,
+				}
+			}
+
+			fb_col := region.out_offset.x + x
+			fb_row[fb_col] = fb_px
+		}
+	}
 }
 
 @(export)
