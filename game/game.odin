@@ -1,6 +1,5 @@
 package game
 
-import "base:intrinsics"
 import "base:runtime"
 import "core:math"
 import "core:math/linalg"
@@ -337,6 +336,8 @@ Bmp_Image :: struct {
 Bmp_Format :: enum {
 	Rgba8le,
 	Argb8le,
+	// TODO: Separate formats for non-alpha channel? Just assume alpha is 255 in
+	// those caes?
 }
 
 Bmp_Pixel_Rgba8le :: struct #packed {
@@ -498,48 +499,49 @@ handmade_game_render :: proc "contextless" (
 	// )
 }
 
-Color :: [3]f32
+Color :: [4]f32
+Color_U8 :: [4]u8
 
 make_color :: proc {
-	make_color_rgb,
+	make_color_rgba_f32,
+	make_color_rgba_u8,
 	make_color_grey,
 }
 
-make_color_rgb :: proc(r, g, b: f32) -> Color {
-	return {r, g, b}
+make_color_rgba_f32 :: proc(r, g, b: f32, a: f32 = 1.0) -> Color {
+	return {r, g, b, a}
 }
 
-make_color_grey :: proc(v: f32) -> Color {
-	return v
+make_color_rgba_u8 :: proc(r, g, b: u8, a: u8 = 255) -> Color {
+	return linalg.to_f32([4]u8{r, g, b, a}) / 255.0
 }
 
-// Xrgb8, little-endian pixel format
-Pixel :: struct #packed {
-	b, g, r, _: u8,
+make_color_grey :: proc(v: f32, a: f32 = 1.0) -> Color {
+	return make_color_rgba_f32(v, v, v, a)
 }
 
 make_pixel :: proc {
 	make_pixel_bits,
-	make_pixel_rgb_u8,
-	make_pixel_rgb_f32,
+	make_pixel_rgba_u8,
+	make_pixel_rgba_f32,
 	make_pixel_color,
 }
 
-make_pixel_rgb_u8 :: proc(r, g, b: u8) -> Pixel {
-	return Pixel{r = r, g = g, b = b}
+make_pixel_rgba_u8 :: #force_inline proc(r, g, b: u8, a: u8 = 255) -> Pixel {
+	return Pixel{r = r, g = g, b = b, a = a}
 }
 
-make_pixel_rgb_f32 :: proc(r, g, b: f32) -> Pixel {
+make_pixel_rgba_f32 :: proc(r, g, b: f32, a: f32 = 1.0) -> Pixel {
 	to_u8 :: proc(v: f32) -> u8 {
 		assert(v >= 0.0)
 		assert(v <= 1.0)
 		return u8(255 * v)
 	}
-	return make_pixel_rgb_u8(to_u8(r), to_u8(g), to_u8(b))
+	return make_pixel_rgba_u8(to_u8(r), to_u8(g), to_u8(b), to_u8(a))
 }
 
 make_pixel_color :: proc(color: Color) -> Pixel {
-	return make_pixel_rgb_f32(color.r, color.g, color.b)
+	return make_pixel_rgba_f32(color.r, color.g, color.b)
 }
 
 make_pixel_bits :: proc(bits: Pixel_Bits) -> Pixel {
@@ -550,6 +552,7 @@ make_pixel_bits :: proc(bits: Pixel_Bits) -> Pixel {
 	}
 }
 
+Pixel :: api.Pixel
 Pixel_Bits :: distinct u32
 
 pixel_bits :: proc(p: Pixel) -> Pixel_Bits {
@@ -562,7 +565,7 @@ frame_buffer_row :: proc(fb: Frame_Buffer, y: int) -> []Pixel {
 	assert(y >= 0)
 	assert(y < int(fb.height))
 	return mem.slice_ptr(
-		(^Pixel)(uintptr(fb.base) + uintptr(y * int(fb.stride))),
+		(^Pixel)(uintptr(fb.pixels) + uintptr(y * int(fb.stride))),
 		int(fb.width),
 	)
 }
@@ -642,11 +645,11 @@ render_rect_tile :: proc(fb: Frame_Buffer, pos, size: [2]f32, color: Color) {
 	)
 }
 
-render_bmp :: proc(fb: Frame_Buffer, pos: [2]f32, image: Bmp_Image) {
+render_bmp :: proc(fb: Frame_Buffer, pos: [2]f32, img: Bmp_Image) {
 	region := map_px_region(
 		fb,
 		round_int(pos),
-		{int(image.width), int(image.height)},
+		{int(img.width), int(img.height)},
 	)
 
 	for y in 0 ..< region.size.y {
@@ -654,29 +657,45 @@ render_bmp :: proc(fb: Frame_Buffer, pos: [2]f32, image: Bmp_Image) {
 		fb_row := frame_buffer_row(fb, region.out_offset.y - y)
 		for x in 0 ..< region.size.x {
 			img_x := region.in_offset.x + x
-			px_index := img_y * int(image.stride) + img_x
-			fb_px: Pixel
-			switch image.format {
+			px_index := img_y * int(img.stride) + img_x
+			src_color: Color_U8
+			// TODO: Convert pixel order to a standard one when loading?
+			switch img.format {
 			case .Rgba8le:
-				bmp_px := ([^]Bmp_Pixel_Rgba8le)(image.pixels)[px_index]
-				fb_px = {
-					r = bmp_px.r,
-					g = bmp_px.g,
-					b = bmp_px.b,
-				}
+				bmp_px := ([^]Bmp_Pixel_Rgba8le)(img.pixels)[px_index]
+				src_color = Color_U8{bmp_px.r, bmp_px.g, bmp_px.b, bmp_px.a}
 			case .Argb8le:
-				bmp_px := ([^]Bmp_Pixel_Argb8le)(image.pixels)[px_index]
-				fb_px = {
-					r = bmp_px.r,
-					g = bmp_px.g,
-					b = bmp_px.b,
-				}
+				bmp_px := ([^]Bmp_Pixel_Argb8le)(img.pixels)[px_index]
+				src_color = Color_U8{bmp_px.r, bmp_px.g, bmp_px.b, bmp_px.a}
 			}
 
 			fb_col := region.out_offset.x + x
-			fb_row[fb_col] = fb_px
+			px := &fb_row[fb_col]
+			res := alpha_blend_u8(Color_U8{px.r, px.g, px.b, px.a}, src_color)
+			px^ = Pixel {
+				r = res.r,
+				g = res.g,
+				b = res.b,
+				a = res.a,
+			}
 		}
 	}
+}
+
+alpha_blend :: proc(dst, src: Color) -> Color {
+	alpha := src.a
+	return dst * (1 - alpha) + src * alpha
+}
+
+alpha_blend_u8 :: proc(dst, src: Color_U8) -> Color_U8 {
+	alpha := src.a
+	// TODO: Using vector opertions is much slower in debug mode. Report bug?
+	r := (u16(dst.r) * (256 - u16(alpha)) + u16(src.r) * (1 + u16(alpha)))
+	g := (u16(dst.g) * (256 - u16(alpha)) + u16(src.g) * (1 + u16(alpha)))
+	b := (u16(dst.b) * (256 - u16(alpha)) + u16(src.b) * (1 + u16(alpha)))
+	a := (u16(dst.a) * (256 - u16(alpha)) + u16(src.a) * (1 + u16(alpha)))
+	// TODO: Report bug for image.blend doing a mask instead of a shift
+	return {u8(r >> 8), u8(g >> 8), u8(b >> 8), u8(a >> 8)}
 }
 
 @(export)

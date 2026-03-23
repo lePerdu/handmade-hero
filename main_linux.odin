@@ -829,7 +829,7 @@ display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
 		buf.frame_buffer.width = width
 		buf.frame_buffer.height = height
 		buf.frame_buffer.stride = stride
-		buf.frame_buffer.base = &state.shm_data[offset]
+		buf.frame_buffer.pixels = &state.shm_data[offset]
 
 		buf.wl_buffer, _ = wayland.wl_shm_pool_create_buffer(
 			&state.conn,

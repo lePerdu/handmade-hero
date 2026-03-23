@@ -1,6 +1,5 @@
 package game_api
 
-import "base:intrinsics"
 import "core:dynlib"
 
 // Game memory is opaque from the the outside to allow its structure to change
@@ -58,10 +57,17 @@ Input :: struct {
 }
 
 Frame_Buffer :: struct {
-	base: rawptr,
-	width: u32,
-	height: u32,
+	// Size in pixels
+	width, height: u32,
+	// Stride in bytes
 	stride: u32,
+	pixels: rawptr,
+}
+
+// argb8, little-endian pixel format
+// TODO: Support more formats and specify the format in `Frame_Buffer`?
+Pixel :: struct {
+	b, g, r, a: u8,
 }
 
 Audio_Timings :: struct {
