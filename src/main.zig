@@ -7,12 +7,51 @@ const State = struct {
 };
 
 pub fn main() !void {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer _ = gpa.deinit();
+
+    const allocator = gpa.allocator();
+
     var state = State{};
     state.display.setup();
 
+    var poll_fds: []std.posix.pollfd = try allocator.alloc(std.posix.pollfd, 1);
+    defer allocator.free(poll_fds);
+
+    const wl_display_fd_index: usize = 0;
+    poll_fds[wl_display_fd_index] = .{
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+        .fd = wayland.wl_display_get_fd(state.display.wl_display),
+    };
+
     while (true) {
-        if (wayland.wl_display_dispatch(state.display.wl_display) < 0) {
-            break;
+        var wl_err: c_int = 0;
+
+        // Reading/flushing procedure described in `man wl_display(3)` under
+        // `wl_display_prepare_read_queue`
+        while (wayland.wl_display_prepare_read(state.display.wl_display) != 0) {
+            wl_err =
+                wayland.wl_display_dispatch_pending(state.display.wl_display);
+            std.debug.assert(wl_err != -1);
+        }
+        wl_err = wayland.wl_display_flush(state.display.wl_display);
+        std.debug.assert(wl_err != -1);
+
+        // Result doesn't matter since error is caught in zig's wrapper
+        _ = std.posix.poll(poll_fds, -1) catch |err| {
+            // TODO: Recover somehow for certain errors?
+            std.debug.panic("poll error: {}", .{err});
+        };
+
+        // TODO: Call these in a loop?
+        {
+            wl_err =
+                wayland.wl_display_read_events(state.display.wl_display);
+            std.debug.assert(wl_err != -1);
+            wl_err =
+                wayland.wl_display_dispatch_pending(state.display.wl_display);
+            std.debug.assert(wl_err != -1);
         }
 
         if (state.display.close_requested) {
