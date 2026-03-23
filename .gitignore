@@ -1,3 +1,6 @@
 /assets/
 /build/
 /data/
+
+/.zig-cache/
+/zig-out/
