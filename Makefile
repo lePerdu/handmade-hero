@@ -16,10 +16,13 @@ all: game
 game: reload | $(BUILD)
 	odin build . $(ODIN_FLAGS) -out:$(EXEC)
 
+# Build into a temporary file first, then move to the final location so that
+# the final file is never incomplete. Imporant since the file is watched
+# and dynamically reloaded
+# -o:speed here even in debug mode since SW rendering is too slow without it
+# TODO: Report that as a bug? Seems like the performance shouldn't be _that_
+# bad in debug mode.
 reload: | $(BUILD)
-	# Build into a temporary file first, then move to the final location so that
-	# the final file is never incomplete. Imporant since the file is watched
-	# and dynamically reloaded
 	odin build game $(ODIN_FLAGS) -out:$(DYNLIB).tmp -build-mode:dynamic
 	mv $(DYNLIB).tmp $(DYNLIB)
 
