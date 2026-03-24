@@ -1,11 +1,13 @@
 package game
 
 import "base:runtime"
+import "core:fmt"
 import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import "core:slice"
+import "core:strings"
 
 import "api"
 
@@ -16,15 +18,28 @@ State :: struct {
 	initialized: bool,
 	world: World,
 	player_pos: World_Pos,
+	player_dir: Player_Dir,
 	world_arena: mem.Arena,
-	background: Bmp_Image,
-	player_head: Bmp_Image,
-	player_torso: Bmp_Image,
-	player_cape: Bmp_Image,
+	background_texture: Bmp_Image,
+	player_textures: [Player_Dir]Player_Textures,
 }
 
 World :: struct {
 	tile_map: Tile_Map,
+}
+
+Player_Textures :: struct {
+	head: Bmp_Image,
+	torso: Bmp_Image,
+	cape: Bmp_Image,
+	align_px: [2]i32,
+}
+
+Player_Dir :: enum {
+	Right,
+	Back,
+	Left,
+	Front,
 }
 
 get_game_context :: proc "contextless" (
@@ -61,27 +76,45 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 			tile = {WINDOW_TILES_WIDTH / 3, WINDOW_TILES_HEIGHT / 3, 0},
 			local = 0,
 		}
+		state.player_dir = .Front
 
-		state.background = debug_load_bmp(
+		state.background_texture = debug_load_bmp(
 			memory,
 			"assets/early_data/test/test_background.bmp",
 		)
-		state.player_head = debug_load_bmp(
-			memory,
-			"assets/early_data/test/test_hero_front_head.bmp",
-		)
-		state.player_cape = debug_load_bmp(
-			memory,
-			"assets/early_data/test/test_hero_front_cape.bmp",
-		)
-		state.player_torso = debug_load_bmp(
-			memory,
-			"assets/early_data/test/test_hero_front_torso.bmp",
-		)
+
+		state.player_textures[.Right] = load_player_textures(memory, "right")
+		state.player_textures[.Back] = load_player_textures(memory, "back")
+		state.player_textures[.Left] = load_player_textures(memory, "left")
+		state.player_textures[.Front] = load_player_textures(memory, "front")
 
 		state.initialized = true
 	}
 	return state
+}
+
+load_player_textures :: proc(
+	memory: api.Memory,
+	dir: string,
+) -> Player_Textures {
+	head := debug_load_bmp(
+		memory,
+		fmt.tprintf("assets/early_data/test/test_hero_{}_head.bmp", dir),
+	)
+	cape := debug_load_bmp(
+		memory,
+		fmt.tprintf("assets/early_data/test/test_hero_{}_cape.bmp", dir),
+	)
+	torso := debug_load_bmp(
+		memory,
+		fmt.tprintf("assets/early_data/test/test_hero_{}_torso.bmp", dir),
+	)
+	return {
+		head = head,
+		cape = cape,
+		torso = torso,
+		align_px = {i32(torso.width) / 2, 0},
+	}
 }
 
 gen_world :: proc(state: ^State) {
@@ -213,15 +246,21 @@ handmade_game_update :: proc "contextless" (
 
 	if input.keyboard[.W].end_pressed || input.keyboard[.Up].end_pressed {
 		player_dir[1] += 1
+		// TODO: Base this off the final direction? Prefer a direction?
+		// Pick the last-pressed one?
+		state.player_dir = .Back
 	}
 	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed {
 		player_dir[0] -= 1
+		state.player_dir = .Left
 	}
 	if input.keyboard[.S].end_pressed || input.keyboard[.Down].end_pressed {
 		player_dir[1] -= 1
+		state.player_dir = .Front
 	}
 	if input.keyboard[.D].end_pressed || input.keyboard[.Right].end_pressed {
 		player_dir[0] += 1
+		state.player_dir = .Right
 	}
 
 	// Scale diagonal movement
@@ -267,7 +306,7 @@ TILE_OFFSET_PX :: [2]f32{-TILE_SIZE_PX / 2, 0}
 
 PLAYER_WIDTH: f32 : 0.7
 PLAYER_HEIGHT: f32 : 1
-PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.25
+PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.5
 
 WINDOW_TILES_WIDTH :: 17
 WINDOW_TILES_HEIGHT :: 9
@@ -415,7 +454,7 @@ handmade_game_render :: proc "contextless" (
 
 	frame_buffer_fill(fb, make_pixel(0xFF00FF))
 
-	render_bmp(fb, {0, 0}, state.background)
+	render_bmp(fb, 0, 0, state.background_texture)
 
 	assert(pos_is_normalized(state.player_pos))
 
@@ -475,28 +514,30 @@ handmade_game_render :: proc "contextless" (
 		}
 	}
 
+	player_tex := state.player_textures[state.player_dir]
+
 	// TODO: Calc render width/height based on image size? Scale bitmaps to fit
 	// pre-defined dimensionts?
 	player_render_pos :=
 		(linalg.to_f32(state.player_pos.tile - window_origin.tile).xy +
-				state.player_pos.local -
-				window_origin.local) *
-			TILE_SIZE_PX -
-		{f32(state.player_torso.width) / 2, 0}
-	render_bmp(fb, player_render_pos, state.player_torso)
-	render_bmp(fb, player_render_pos, state.player_cape)
-	render_bmp(fb, player_render_pos, state.player_head)
+			state.player_pos.local -
+			window_origin.local) *
+		TILE_SIZE_PX
+	render_bmp(fb, player_render_pos, player_tex.align_px, player_tex.torso)
+	render_bmp(fb, player_render_pos, player_tex.align_px, player_tex.cape)
+	render_bmp(fb, player_render_pos, player_tex.align_px, player_tex.head)
 
-	// render_rect_tile(
-	// 	fb,
-	// 	pos = (linalg.to_f32(state.player_pos.tile - window_origin.tile).xy +
-	// 		state.player_pos.local -
-	// 		window_origin.local +
-	// 		0.5 -
-	// 		{PLAYER_WIDTH / 2, 0}),
-	// 	size = {PLAYER_WIDTH, PLAYER_HEIGHT},
-	// 	color = make_color(0.8, 0.1, 0.1),
-	// )
+	MARKER_SIZE :: 0.1
+	render_rect_tile(
+		fb,
+		pos = (linalg.to_f32(state.player_pos.tile - window_origin.tile).xy +
+			state.player_pos.local -
+			window_origin.local +
+			0.5 -
+			{MARKER_SIZE / 2, 0}),
+		size = MARKER_SIZE,
+		color = make_color(0.8, 0.0, 0.0),
+	)
 }
 
 Color :: [4]f32
@@ -645,7 +686,13 @@ render_rect_tile :: proc(fb: Frame_Buffer, pos, size: [2]f32, color: Color) {
 	)
 }
 
-render_bmp :: proc(fb: Frame_Buffer, pos: [2]f32, img: Bmp_Image) {
+render_bmp :: proc(
+	fb: Frame_Buffer,
+	pos: [2]f32,
+	align: [2]i32,
+	img: Bmp_Image,
+) {
+	pos := pos - linalg.to_f32(align)
 	region := map_px_region(
 		fb,
 		round_int(pos),
