@@ -7,7 +7,6 @@ import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import "core:slice"
-import "core:strings"
 
 import "api"
 
@@ -17,6 +16,7 @@ State :: struct {
 	// Relies on game memory being 0-initialized
 	initialized: bool,
 	world: World,
+	camera_pos: World_Pos,
 	player_pos: World_Pos,
 	player_dir: Player_Dir,
 	world_arena: mem.Arena,
@@ -72,6 +72,10 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	if !state.initialized {
 		mem.arena_init(&state.world_arena, memory.persistent[size_of(State):])
 		gen_world(state)
+		state.camera_pos = {
+			tile = {WINDOW_TILES_WIDTH / 2, WINDOW_TILES_HEIGHT / 2, 0},
+			local = 0,
+		}
 		state.player_pos = {
 			tile = {WINDOW_TILES_WIDTH / 3, WINDOW_TILES_HEIGHT / 3, 0},
 			local = 0,
@@ -237,7 +241,6 @@ handmade_game_update :: proc "contextless" (
 
 	// Sign of the movement: -1, 0, +1
 	player_dir: [2]f32
-	PLAYER_SPEED: f32 : 4 // tile/sec
 	player_delta: f32 = PLAYER_SPEED * 1e-9 * f32(input.dt_ns)
 
 	if input.keyboard[.Space].end_pressed {
@@ -299,6 +302,16 @@ handmade_game_update :: proc "contextless" (
 			state.player_pos.tile.z -= 1
 		}
 	}
+
+	state.camera_pos = World_Pos {
+		// Move camera by window-sized chunks
+		tile = (state.player_pos.tile / WINDOW_DIMS_TILES) *
+			WINDOW_DIMS_TILES + WINDOW_HALF_SIZE,
+		local = 0,
+		// Center player
+		// tile = state.player_pos.tile,
+		// local = state.player_pos.local,
+	}
 }
 
 TILE_SIZE_PX :: 60
@@ -307,10 +320,14 @@ TILE_OFFSET_PX :: [2]f32{-TILE_SIZE_PX / 2, 0}
 PLAYER_WIDTH: f32 : 0.7
 PLAYER_HEIGHT: f32 : 1
 PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.5
+PLAYER_SPEED: f32 : 3 // tile/sec
 
 WINDOW_TILES_WIDTH :: 17
 WINDOW_TILES_HEIGHT :: 9
-WINDOW_CENTER :: [2]i32{WINDOW_TILES_WIDTH / 2, WINDOW_TILES_HEIGHT / 2}
+WINDOW_DIMS_TILES: [3]i32 : {WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT, 1}
+// Can't do `WINDOW_DIMS_TILES / 2` since it's "not a compile-time constant"
+// TODO: Report bug?
+WINDOW_HALF_SIZE: [3]i32 : {WINDOW_TILES_WIDTH / 2, WINDOW_TILES_HEIGHT / 2, 0}
 
 Bmp_Header :: struct #packed {
 	id: [2]u8,
@@ -458,21 +475,18 @@ handmade_game_render :: proc "contextless" (
 
 	assert(pos_is_normalized(state.player_pos))
 
-	// `- 1` to account for the screen overlap
-	WINDOW_TILES_DIMS :: [?]i32{WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT, 1}
+	// state.camera_pos, adjusted so that it points to the bottom-left corner
+	// instead of the center
 	window_origin := World_Pos {
-		tile = (state.player_pos.tile / WINDOW_TILES_DIMS) * WINDOW_TILES_DIMS,
-		local = 0,
+		tile = state.camera_pos.tile - WINDOW_HALF_SIZE,
+		local = state.camera_pos.local,
 	}
-	// Scroll screen with player
-	// window_origin = World_Pos {
-	// 	tile = state.player_pos.tile - {WINDOW_TILES_WIDTH / 2, WINDOW_TILES_HEIGHT / 2} ,
-	// 	local = state.player_pos.local,
-	// }
 
-	for row in 0 ..< i32(WINDOW_TILES_HEIGHT) {
-		for col in 0 ..< i32(WINDOW_TILES_WIDTH) {
-			window_pos := Global_Tile_Pos{col, row, 0}
+	// TODO: Only over-draw when the camera follows the player? Only when the
+	// camera isn't aligned to tiles?
+	for window_row in -1 ..= i32(WINDOW_TILES_HEIGHT) {
+		for window_col in -1 ..= i32(WINDOW_TILES_WIDTH) {
+			window_pos := Global_Tile_Pos{window_col, window_row, 0}
 			tile_pos := window_pos + window_origin.tile
 			tile_val, ok := tile_map_get_tile_ptr(
 				state.world.tile_map,
@@ -507,7 +521,7 @@ handmade_game_render :: proc "contextless" (
 
 			render_rect_tile(
 				fb,
-				pos = (linalg.to_f32(window_pos.xy) - window_origin.local),
+				pos = (linalg.to_f32(window_pos.xy) - state.camera_pos.local),
 				size = 1,
 				color = color,
 			)

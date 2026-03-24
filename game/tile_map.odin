@@ -19,6 +19,10 @@ World_Pos :: struct {
 	// TODO: Store `local` as f16 when packing?
 }
 
+world_pos_sub :: proc(a, b: World_Pos) -> World_Pos {
+	return {tile = a.tile - b.tile, local = a.local - b.local}
+}
+
 normalize_pos :: proc(pos: World_Pos) -> World_Pos {
 	// TODO: Make this resilient to precision errors (unit test?)
 	// - Just have pos_is_normalized compare against epsilon? Might be fine to
