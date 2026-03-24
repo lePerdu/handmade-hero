@@ -22,6 +22,7 @@ State :: struct {
 	world_arena: mem.Arena,
 	background_texture: Bmp_Image,
 	player_textures: [Player_Dir]Player_Textures,
+	player_shadow_texture: Bmp_Image,
 }
 
 World :: struct {
@@ -91,6 +92,10 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 		state.player_textures[.Back] = load_player_textures(memory, "back")
 		state.player_textures[.Left] = load_player_textures(memory, "left")
 		state.player_textures[.Front] = load_player_textures(memory, "front")
+		state.player_shadow_texture = debug_load_bmp(
+			memory,
+			"assets/early_data/test/test_hero_shadow.bmp",
+		)
 
 		state.initialized = true
 	}
@@ -537,6 +542,14 @@ handmade_game_render :: proc "contextless" (
 			state.player_pos.local -
 			window_origin.local) *
 		TILE_SIZE_PX
+	render_bmp(
+		fb,
+		player_render_pos,
+		// TODO: Is this the proper aling position for the shadow in all
+		// directions?
+		player_tex.align_px,
+		state.player_shadow_texture,
+	)
 	render_bmp(fb, player_render_pos, player_tex.align_px, player_tex.torso)
 	render_bmp(fb, player_render_pos, player_tex.align_px, player_tex.cape)
 	render_bmp(fb, player_render_pos, player_tex.align_px, player_tex.head)
