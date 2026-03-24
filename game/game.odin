@@ -6,6 +6,7 @@ import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
+import "core:simd"
 import "core:slice"
 
 import "api"
@@ -745,12 +746,23 @@ render_bmp :: proc(
 
 			fb_col := region.out_offset.x + x
 			px := &fb_row[fb_col]
-			res := alpha_blend_u8(Color_U8{px.r, px.g, px.b, px.a}, src_color)
-			px^ = Pixel {
-				r = res.r,
-				g = res.g,
-				b = res.b,
-				a = res.a,
+			// Manual inlining is _much_ faster than calling an equivalent
+			// function (25ms vs 40ms per frame).
+			// TODO: Report bug? Or is this just expected in debug mode?
+			// alpha_blend_u8_into(px, src_color)
+			{
+				alpha := u32(src_color.a)
+				// TODO: Extracting these adds ~4ms per frame
+				// src_alpha := 1 + alpha
+				// dst_alpha := 256 - alpha
+				r := u32(px.r) * (256 - alpha) + u32(src_color.r) * (1 + alpha)
+				g := u32(px.g) * (256 - alpha) + u32(src_color.g) * (1 + alpha)
+				b := u32(px.b) * (256 - alpha) + u32(src_color.b) * (1 + alpha)
+				px^ = {
+					r = u8(r >> 8),
+					g = u8(g >> 8),
+					b = u8(b >> 8),
+				}
 			}
 		}
 	}
@@ -762,14 +774,28 @@ alpha_blend :: proc(dst, src: Color) -> Color {
 }
 
 alpha_blend_u8 :: proc(dst, src: Color_U8) -> Color_U8 {
-	alpha := src.a
+	alpha := u32(src.a)
 	// TODO: Using vector opertions is much slower in debug mode. Report bug?
-	r := (u16(dst.r) * (256 - u16(alpha)) + u16(src.r) * (1 + u16(alpha)))
-	g := (u16(dst.g) * (256 - u16(alpha)) + u16(src.g) * (1 + u16(alpha)))
-	b := (u16(dst.b) * (256 - u16(alpha)) + u16(src.b) * (1 + u16(alpha)))
-	a := (u16(dst.a) * (256 - u16(alpha)) + u16(src.a) * (1 + u16(alpha)))
+	r := (u32(dst.r) * (256 - alpha) + u32(src.r) * (1 + alpha))
+	g := (u32(dst.g) * (256 - alpha) + u32(src.g) * (1 + alpha))
+	b := (u32(dst.b) * (256 - alpha) + u32(src.b) * (1 + alpha))
+	a := (u32(dst.a) * (256 - alpha) + u32(src.a) * (1 + alpha))
 	// TODO: Report bug for image.blend doing a mask instead of a shift
 	return {u8(r >> 8), u8(g >> 8), u8(b >> 8), u8(a >> 8)}
+}
+
+alpha_blend_u8_into :: proc(dst: ^Pixel, src: Color_U8) {
+	alpha := u32(src.a)
+	r := (u32(dst.r) * (256 - alpha) + u32(src.r) * (1 + alpha))
+	g := (u32(dst.g) * (256 - alpha) + u32(src.g) * (1 + alpha))
+	b := (u32(dst.b) * (256 - alpha) + u32(src.b) * (1 + alpha))
+	// a := (u16(dst.a) * (256 - u16(alpha)) + u16(src.a) * (1 + u16(alpha)))
+	dst^ = {
+		r = u8(r >> 8),
+		g = u8(g >> 8),
+		b = u8(b >> 8),
+		// a = u8(a >> 8),
+	}
 }
 
 @(export)
