@@ -6,7 +6,6 @@ import "core:c"
 import "core:dynlib"
 import "core:fmt"
 import "core:log"
-import "core:math"
 import "core:math/fixed"
 import "core:math/rand"
 import "core:mem"
@@ -346,6 +345,12 @@ handle_engine_input :: proc(state: ^State) {
 			break
 		}
 	}
+	if game_api.button_input_toggled(
+		state.display.engine_keyboard_input[.F11],
+	) {
+		display_toggle_fullscreen(&state.display)
+	}
+
 	game_api.keyboard_input_reset(&state.display.engine_keyboard_input)
 }
 
@@ -643,6 +648,7 @@ Engine_Key :: enum {
 	Num_7,
 	Num_8,
 	Num_9,
+	F11,
 }
 
 ENGINE_NUM_KEYS :: [?]Engine_Key {
@@ -688,6 +694,11 @@ Display_State :: struct {
 	// Index of the buffer which should be used to render the next frame
 	back_buffer_index: int,
 
+	// Window state changes buffered until the next xdg_surface.configure
+	buffered_window_state: Window_State,
+	current_window_state: Window_State,
+	fullscreen_state: Fullscreen_State,
+
 	// Keyboard
 	wl_keyboard: wayland.Wl_Keyboard,
 	// Keys that are only used for the engine, not passed to the game code
@@ -713,6 +724,18 @@ Surface_State :: enum {
 	Initial = 0,
 	Pending_Configure,
 	Configured,
+}
+
+Window_State :: struct {
+	width, height: u32,
+	fullscreen: bool,
+}
+
+Fullscreen_State :: enum {
+	Off = 0,
+	Requested_On,
+	Requested_Off,
+	On,
 }
 
 display_init :: proc(state: ^Display_State) -> bool {
@@ -783,14 +806,24 @@ display_init :: proc(state: ^Display_State) -> bool {
 	)
 	_ = wayland.wl_surface_commit(&state.conn, state.wl_surface)
 
-	display_setup_buffers(state, 960, 540)
+	state.current_window_state = {
+		width = 960,
+		height = 540,
+		fullscreen = false,
+	}
+	state.buffered_window_state = state.current_window_state
+	display_setup_buffers(state)
 
 	return true
 }
 
-display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
+display_setup_buffers :: proc(state: ^Display_State) {
+	width := state.current_window_state.width
+	height := state.current_window_state.height
 	stride := width * COLOR_CHANNELS
 	buffer_size := stride * height
+
+	log.infof("allocate display buffers: {}x{}", width, height)
 
 	// Free current allocations
 	// TODO: Re-use current SHM allocation when possible
@@ -800,6 +833,8 @@ display_setup_buffers :: proc(state: ^Display_State, width, height: u32) {
 		if buf.wl_buffer != wayland.OBJECT_ID_NIL {
 			// TODO: Should destroying the buffer wait until the buffer is released?
 			// That could get tricky since events are async...
+			// Maybe a handle doesn't have to be tracked, since the server will
+			// send a `wl_buffer.release` event?
 			_ = wayland.wl_buffer_destroy(&state.conn, buf.wl_buffer)
 		}
 	}
@@ -917,14 +952,6 @@ display_submit_frame :: proc(state: ^Display_State) {
 		max(i32),
 	)
 
-	if serial, ok := state.xdg_configure_serial.?; ok {
-		_ = wayland.xdg_surface_ack_configure(
-			&state.conn,
-			state.xdg_surface,
-			serial,
-		)
-		state.xdg_configure_serial = nil
-	}
 	wayland.wl_surface_commit(&state.conn, state.wl_surface)
 	back_buffer.state = .Attached
 
@@ -935,6 +962,24 @@ display_submit_first_frame :: proc(state: ^Display_State) {
 	state.last_frame_time_ns = get_perf_counter_wall_ns()
 	request_frame_callback(state)
 	display_submit_frame(state)
+}
+
+display_toggle_fullscreen :: proc(state: ^Display_State) {
+	switch (state.fullscreen_state) {
+	case .Off, .Requested_On:
+		_ = wayland.xdg_toplevel_set_fullscreen(
+			&state.conn,
+			state.xdg_toplevel,
+			wayland.OBJECT_ID_NIL,
+		)
+		state.fullscreen_state = .Requested_On
+	case .On, .Requested_Off:
+		_ = wayland.xdg_toplevel_unset_fullscreen(
+			&state.conn,
+			state.xdg_toplevel,
+		)
+		state.fullscreen_state = .Requested_Off
+	}
 }
 
 process_wayland_messages :: proc(state: ^Display_State) {
@@ -1020,6 +1065,15 @@ handle_event :: proc(
 			handle_keyboard_keymap(
 				state,
 				wayland.wl_keyboard_keymap_parse(
+					&state.conn,
+					message,
+				) or_return,
+			)
+			return nil
+		case wayland.WL_KEYBOARD_REPEAT_INFO_EVENT_OPCODE:
+			handle_keyboard_reapeat_info(
+				state,
+				wayland.wl_keyboard_repeat_info_parse(
 					&state.conn,
 					message,
 				) or_return,
@@ -1135,6 +1189,15 @@ handle_event :: proc(
 		}
 	case state.xdg_toplevel:
 		switch opcode {
+		case wayland.XDG_TOPLEVEL_WM_CAPABILITIES_EVENT_OPCODE:
+			handle_xdg_toplevel_wm_capabilities(
+				state,
+				wayland.xdg_toplevel_wm_capabilities_parse(
+					&state.conn,
+					message,
+				) or_return,
+			)
+			return nil
 		case wayland.XDG_TOPLEVEL_CLOSE_EVENT_OPCODE:
 			handle_xdg_toplevel_close(
 				state,
@@ -1148,6 +1211,15 @@ handle_event :: proc(
 			handle_xdg_toplevel_configure(
 				state,
 				wayland.xdg_toplevel_configure_parse(
+					&state.conn,
+					message,
+				) or_return,
+			)
+			return nil
+		case wayland.XDG_TOPLEVEL_CONFIGURE_BOUNDS_EVENT_OPCODE:
+			handle_xdg_toplevel_configure_bounds(
+				state,
+				wayland.xdg_toplevel_configure_bounds_parse(
 					&state.conn,
 					message,
 				) or_return,
@@ -1191,7 +1263,7 @@ handle_event :: proc(
 		}
 	}
 
-	log.debugf(
+	log.warnf(
 		"<- unhandled message: target={} opcode={} size={}",
 		message.header.target,
 		message.header.opcode,
@@ -1253,19 +1325,67 @@ handle_xdg_surface_configure :: proc(
 	state: ^Display_State,
 	event: wayland.Xdg_Surface_Configure_Event,
 ) {
-	state.xdg_configure_serial = event.serial
+	// TODO: Remove field
+	// state.xdg_configure_serial = event.serial
+
+	// TODO: Only check the size for re-allocating buffers
+	if state.buffered_window_state != state.current_window_state {
+		state.current_window_state = state.buffered_window_state
+		display_setup_buffers(state)
+
+		state.fullscreen_state =
+			state.current_window_state.fullscreen ? .On : .Off
+	}
+
+	_ = wayland.xdg_surface_ack_configure(
+		&state.conn,
+		state.xdg_surface,
+		event.serial,
+	)
+}
+
+handle_xdg_toplevel_wm_capabilities :: proc(
+	state: ^Display_State,
+	event: wayland.Xdg_Toplevel_Wm_Capabilities_Event,
+) {
+	// TODO: Handle
 }
 
 handle_xdg_toplevel_configure :: proc(
 	state: ^Display_State,
 	event: wayland.Xdg_Toplevel_Configure_Event,
 ) {
-	states := mem.slice_data_cast(
+	toplevel_states := mem.slice_data_cast(
 		[]wayland.Xdg_Toplevel_State_Enum,
 		event.states,
 	)
-	log.debug("xdg_toplevel.configure: states={}", states)
-	// TODO: Actually handle the requests
+	log.debug("xdg_toplevel.configure: states={}", toplevel_states)
+	is_fullscreen: bool
+	for toplevel_state in toplevel_states {
+		#partial switch toplevel_state {
+		case .Fullscreen:
+			is_fullscreen = true
+		}
+	}
+
+	// Buffer window size/state until next xdg_surface_configure
+	window_state := &state.buffered_window_state
+
+	window_state.fullscreen = is_fullscreen
+	// TODO: Check for negative
+	if event.width != 0 {
+		window_state.width = u32(event.width)
+	}
+	if event.height != 0 {
+		window_state.height = u32(event.height)
+	}
+}
+
+handle_xdg_toplevel_configure_bounds :: proc(
+	state: ^Display_State,
+	event: wayland.Xdg_Toplevel_Configure_Bounds_Event,
+) {
+	// TODO: Handle
 }
 
 request_frame_callback :: proc(state: ^Display_State) {
@@ -1353,6 +1473,13 @@ KEY_DOWN :: 108
 KEY_RIGHT :: 106
 KEY_SPACE :: 57
 
+handle_keyboard_reapeat_info :: proc(
+	state: ^Display_State,
+	event: wayland.Wl_Keyboard_Repeat_Info_Event,
+) {
+	// TODO: Handle?
+}
+
 handle_keyboard_keymap :: proc(
 	state: ^Display_State,
 	event: wayland.Wl_Keyboard_Keymap_Event,
@@ -1399,6 +1526,7 @@ KEY_0 :: 11
 KEY_L :: 38
 KEY_P :: 25
 KEY_ESC :: 1
+KEY_F11 :: 87
 
 scancode_to_engine_key :: proc(code: u32) -> (Engine_Key, bool) {
 	switch code {
@@ -1428,6 +1556,8 @@ scancode_to_engine_key :: proc(code: u32) -> (Engine_Key, bool) {
 		return .P, true
 	case KEY_ESC:
 		return .Esc, true
+	case KEY_F11:
+		return .F11, true
 	case:
 		return {}, false
 	}
