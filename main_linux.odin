@@ -738,6 +738,9 @@ Fullscreen_State :: enum {
 	On,
 }
 
+DEFAULT_WINDOW_WIDTH :: 960
+DEFAULT_WINDOW_HEIGHT :: 540
+
 display_init :: proc(state: ^Display_State) -> bool {
 	if err := wayland.connection_init(&state.conn); err != nil {
 		log.fatal("failed to setup connection:", err)
@@ -807,8 +810,8 @@ display_init :: proc(state: ^Display_State) -> bool {
 	_ = wayland.wl_surface_commit(&state.conn, state.wl_surface)
 
 	state.current_window_state = {
-		width = 960,
-		height = 540,
+		width = DEFAULT_WINDOW_WIDTH,
+		height = DEFAULT_WINDOW_HEIGHT,
 		fullscreen = false,
 	}
 	state.buffered_window_state = state.current_window_state

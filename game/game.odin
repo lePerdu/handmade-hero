@@ -6,7 +6,6 @@ import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
-import "core:simd"
 import "core:slice"
 
 import "api"
@@ -475,7 +474,17 @@ handmade_game_render :: proc "contextless" (
 	context = get_game_context(memory)
 	state := get_game_state(memory)
 
-	frame_buffer_fill(fb, make_pixel(0xFF00FF))
+	frame_buffer_fill(fb, make_pixel(0, 0, 0))
+	// TODO: Scale up rendering instead of just rendering to the center of the
+	// window
+	fb := frame_buffer_center_region(
+		fb,
+		linalg.min(
+			[2]u32{fb.width, fb.height},
+			[2]u32{WINDOW_TILES_WIDTH - 1, WINDOW_TILES_HEIGHT} * TILE_SIZE_PX,
+		),
+	)
+	frame_buffer_fill(fb, make_pixel(0xFF, 0x00, 0xFF))
 
 	render_bmp(fb, 0, 0, state.background_texture)
 
@@ -628,6 +637,37 @@ pixel_bits :: proc(p: Pixel) -> Pixel_Bits {
 	// TODO: Check endianness of the machine?
 	// TODO: transmute?
 	return Pixel_Bits(p.b) | (Pixel_Bits(p.g) << 8) | (Pixel_Bits(p.r) << 16)
+}
+
+frame_buffer_sub_region :: proc(
+	fb: Frame_Buffer,
+	pos, size: [2]u32,
+) -> Frame_Buffer {
+	assert(pos.x <= fb.width)
+	assert(pos.y <= fb.height)
+	assert(pos.x + size.x <= fb.width)
+	assert(pos.y + size.y <= fb.height)
+	return {
+		width = size.x,
+		height = size.y,
+		stride = fb.stride,
+		pixels = rawptr(
+			uintptr(fb.pixels) +
+			uintptr(pos.y * fb.stride) +
+			uintptr(pos.x * size_of(Pixel)),
+		),
+	}
+}
+
+frame_buffer_center_region :: proc(
+	fb: Frame_Buffer,
+	size: [2]u32,
+) -> Frame_Buffer {
+	return frame_buffer_sub_region(
+		fb,
+		{(fb.width - size.x) / 2, (fb.height - size.y) / 2},
+		size,
+	)
 }
 
 frame_buffer_row :: proc(fb: Frame_Buffer, y: int) -> []Pixel {
