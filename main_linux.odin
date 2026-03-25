@@ -1617,7 +1617,16 @@ handle_keyboard_modifiers :: proc(
 ) {}
 
 setup_pointer_cursor :: proc(state: ^Display_State, event_serial: u32) {
+	// Just hide for now
 	// TODO: Custom cursor? Hide Wayland's cursor and draw in game code?
+	wayland.wl_pointer_set_cursor(
+		&state.conn,
+		state.wl_pointer,
+		event_serial,
+		wayland.OBJECT_ID_NIL,
+		0,
+		0,
+	)
 }
 
 handle_pointer_enter :: proc(
