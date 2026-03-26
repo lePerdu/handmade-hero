@@ -146,23 +146,20 @@ gen_world :: proc(state: ^State) {
 		),
 	}
 
+	rand.reset(2)
 	screen_x, screen_y, screen_z: i32
 	door_left, door_right, door_bottom, door_top, stair, stair_exit: bool
 	for screen_i in 0 ..< 100 {
 		// TODO: Custom RNG
-		r := rand.uint_max(3)
+		// Can't add a stair if there is already a stair exit here
+		r := rand.uint_max(stair_exit ? 2 : 3)
 		switch r {
 		case 0:
 			door_right = true
 		case 1:
 			door_top = true
 		case 2:
-			// Also add a door
-			if stair_exit {
-				door_right = true
-			} else {
-				stair = true
-			}
+			stair = true
 		}
 		door_up := (stair || stair_exit) && screen_z == 0
 		door_down := (stair || stair_exit) && screen_z == 1
