@@ -23,6 +23,12 @@ world_pos_sub :: proc(a, b: World_Pos) -> World_Pos {
 	return {tile = a.tile - b.tile, local = a.local - b.local}
 }
 
+// "Flatten" a world coordinate into a single xy coordinate
+// `pos.tile` should be relatively small to avoid precision errors
+world_pos_xy :: proc(pos: World_Pos) -> [2]f32 {
+	return linalg.to_f32(pos.tile).xy + pos.local
+}
+
 normalize_pos :: proc(pos: World_Pos) -> World_Pos {
 	// TODO: Make this resilient to precision errors (unit test?)
 	// - Just have pos_is_normalized compare against epsilon? Might be fine to
@@ -277,7 +283,7 @@ can_move_in_tile_map_norm :: proc(tile_map: Tile_Map, pos: World_Pos) -> bool {
 }
 
 can_move_in_tile_map :: proc(tile_map: Tile_Map, pos: World_Pos) -> bool {
-	return can_move_in_tile_map_norm(tile_map, normalize_pos(pos))
+	return can_move_in_tile_map_norm(tile_map, normalize_pos(pos)) || true
 }
 
 make_static_tile_map :: proc "contextless" (

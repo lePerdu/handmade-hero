@@ -74,11 +74,11 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 		mem.arena_init(&state.world_arena, memory.persistent[size_of(State):])
 		gen_world(state)
 		state.camera_pos = {
-			tile = {WINDOW_TILES_WIDTH / 2, WINDOW_TILES_HEIGHT / 2, 0},
+			tile = {VIEW_TILES_WIDTH / 2, VIEW_TILES_HEIGHT / 2, 0},
 			local = 0,
 		}
 		state.player_pos = {
-			tile = {WINDOW_TILES_WIDTH / 3, WINDOW_TILES_HEIGHT / 3, 0},
+			tile = {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
 			local = 0,
 		}
 		state.player_dir = .Front
@@ -134,8 +134,8 @@ gen_world :: proc(state: ^State) {
 	context.allocator = mem.arena_allocator(&state.world_arena)
 
 	map_size := [?]i32 {
-		SCREENS_X * WINDOW_TILES_WIDTH / CHUNK_SIZE,
-		SCREENS_Y * WINDOW_TILES_HEIGHT / CHUNK_SIZE,
+		SCREENS_X * VIEW_TILES_WIDTH / CHUNK_SIZE,
+		SCREENS_Y * VIEW_TILES_HEIGHT / CHUNK_SIZE,
 		2,
 	}
 	state.world.tile_map = {
@@ -167,11 +167,11 @@ gen_world :: proc(state: ^State) {
 		door_up := (stair || stair_exit) && screen_z == 0
 		door_down := (stair || stair_exit) && screen_z == 1
 
-		for y in 0 ..< i32(WINDOW_TILES_HEIGHT) {
-			for x in 0 ..< i32(WINDOW_TILES_WIDTH) {
+		for y in 0 ..< i32(VIEW_TILES_HEIGHT) {
+			for x in 0 ..< i32(VIEW_TILES_WIDTH) {
 				pos := Global_Tile_Pos {
-					screen_x * WINDOW_TILES_WIDTH + x,
-					screen_y * WINDOW_TILES_HEIGHT + y,
+					screen_x * VIEW_TILES_WIDTH + x,
+					screen_y * VIEW_TILES_HEIGHT + y,
 					screen_z,
 				}
 				tile, ok := tile_map_get_tile_or_alloc_chunk(
@@ -180,31 +180,31 @@ gen_world :: proc(state: ^State) {
 				)
 				assert(ok)
 				if x == 0 {
-					if y == WINDOW_TILES_HEIGHT / 2 && door_left {
+					if y == VIEW_TILES_HEIGHT / 2 && door_left {
 						tile^ = .Door
 					} else {
 						tile^ = .Wall
 					}
-				} else if x == WINDOW_TILES_WIDTH - 1 {
-					if y == WINDOW_TILES_HEIGHT / 2 && door_right {
+				} else if x == VIEW_TILES_WIDTH - 1 {
+					if y == VIEW_TILES_HEIGHT / 2 && door_right {
 						tile^ = .Door
 					} else {
 						tile^ = .Wall
 					}
 				} else if y == 0 {
-					if x == WINDOW_TILES_WIDTH / 2 && door_bottom {
+					if x == VIEW_TILES_WIDTH / 2 && door_bottom {
 						tile^ = .Door
 					} else {
 						tile^ = .Wall
 					}
-				} else if y == WINDOW_TILES_HEIGHT - 1 {
-					if x == WINDOW_TILES_WIDTH / 2 && door_top {
+				} else if y == VIEW_TILES_HEIGHT - 1 {
+					if x == VIEW_TILES_WIDTH / 2 && door_top {
 						tile^ = .Door
 					} else {
 						tile^ = .Wall
 					}
-				} else if x == WINDOW_TILES_WIDTH / 2 &&
-				   y == WINDOW_TILES_HEIGHT / 2 {
+				} else if x == VIEW_TILES_WIDTH / 2 &&
+				   y == VIEW_TILES_HEIGHT / 2 {
 					if door_up {
 						tile^ = .Stair_Up
 					} else if door_down {
@@ -310,12 +310,12 @@ handmade_game_update :: proc "contextless" (
 
 	state.camera_pos = World_Pos {
 		// Move camera by window-sized chunks
-		tile = (state.player_pos.tile / WINDOW_DIMS_TILES) *
-			WINDOW_DIMS_TILES + WINDOW_HALF_SIZE,
-		local = 0,
+		// tile = (state.player_pos.tile / VIEW_TILES_DIMS) *
+		// 	VIEW_TILES_DIMS + VIEW_TILES_DIMS / 2,
+		// local = 0,
 		// Center player
-		// tile = state.player_pos.tile,
-		// local = state.player_pos.local,
+		tile = state.player_pos.tile,
+		local = state.player_pos.local,
 	}
 }
 
@@ -327,12 +327,13 @@ PLAYER_HEIGHT: f32 : 1
 PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.5
 PLAYER_SPEED: f32 : 3 // tile/sec
 
-WINDOW_TILES_WIDTH :: 17
+WINDOW_TILES_WIDTH :: 16
 WINDOW_TILES_HEIGHT :: 9
-WINDOW_DIMS_TILES: [3]i32 : {WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT, 1}
-// Can't do `WINDOW_DIMS_TILES / 2` since it's "not a compile-time constant"
-// TODO: Report bug?
-WINDOW_HALF_SIZE: [3]i32 : {WINDOW_TILES_WIDTH / 2, WINDOW_TILES_HEIGHT / 2, 0}
+// Include an extra tile that's half-shown on either side so that there can be a
+// "middle" tile
+VIEW_TILES_WIDTH :: 17
+VIEW_TILES_HEIGHT :: 9
+VIEW_TILES_DIMS: [3]i32 : {VIEW_TILES_WIDTH, VIEW_TILES_HEIGHT, 1}
 
 Bmp_Header :: struct #packed {
 	id: [2]u8,
@@ -474,6 +475,7 @@ handmade_game_render :: proc "contextless" (
 	context = get_game_context(memory)
 	state := get_game_state(memory)
 
+	// Fill borders
 	frame_buffer_fill(fb, make_pixel(0, 0, 0))
 	// TODO: Scale up rendering instead of just rendering to the center of the
 	// window
@@ -481,9 +483,10 @@ handmade_game_render :: proc "contextless" (
 		fb,
 		linalg.min(
 			[2]u32{fb.width, fb.height},
-			[2]u32{WINDOW_TILES_WIDTH - 1, WINDOW_TILES_HEIGHT} * TILE_SIZE_PX,
+			[2]u32{WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT} * TILE_SIZE_PX,
 		),
 	)
+	// Fill with ugly color so it's obvious when some part isn't covered
 	frame_buffer_fill(fb, make_pixel(0xFF, 0x00, 0xFF))
 
 	render_bmp(fb, 0, 0, state.background_texture)
@@ -493,14 +496,15 @@ handmade_game_render :: proc "contextless" (
 	// state.camera_pos, adjusted so that it points to the bottom-left corner
 	// instead of the center
 	window_origin := World_Pos {
-		tile = state.camera_pos.tile - WINDOW_HALF_SIZE,
+		tile = state.camera_pos.tile - VIEW_TILES_DIMS / 2,
 		local = state.camera_pos.local,
 	}
 
-	// TODO: Only over-draw when the camera follows the player? Only when the
-	// camera isn't aligned to tiles?
-	for window_row in -1 ..= i32(WINDOW_TILES_HEIGHT) {
-		for window_col in -1 ..= i32(WINDOW_TILES_WIDTH) {
+	// Can reduce the tiles drawn when the camera is tile-aligned
+	overdraw_x: i32 = window_origin.local.x == 0.0 ? 0 : 1
+	overdraw_y: i32 = window_origin.local.y == 0.0 ? 0 : 1
+	for window_row in -overdraw_y ..< i32(VIEW_TILES_HEIGHT) + overdraw_y {
+		for window_col in -overdraw_x ..< i32(VIEW_TILES_WIDTH) + overdraw_x {
 			window_pos := Global_Tile_Pos{window_col, window_row, 0}
 			tile_pos := window_pos + window_origin.tile
 			tile_val, ok := tile_map_get_tile_ptr(
@@ -545,33 +549,28 @@ handmade_game_render :: proc "contextless" (
 
 	player_tex := state.player_textures[state.player_dir]
 
+	player_render_pos := world_pos_xy(
+		world_pos_sub(state.player_pos, window_origin),
+	)
+	player_render_pos_px := player_render_pos * TILE_SIZE_PX
 	// TODO: Calc render width/height based on image size? Scale bitmaps to fit
 	// pre-defined dimensionts?
-	player_render_pos :=
-		(linalg.to_f32(state.player_pos.tile - window_origin.tile).xy +
-			state.player_pos.local -
-			window_origin.local) *
-		TILE_SIZE_PX
 	render_bmp(
 		fb,
-		player_render_pos,
+		player_render_pos_px,
 		// TODO: Is this the proper aling position for the shadow in all
 		// directions?
 		player_tex.align_px,
 		state.player_shadow_texture,
 	)
-	render_bmp(fb, player_render_pos, player_tex.align_px, player_tex.torso)
-	render_bmp(fb, player_render_pos, player_tex.align_px, player_tex.cape)
-	render_bmp(fb, player_render_pos, player_tex.align_px, player_tex.head)
+	render_bmp(fb, player_render_pos_px, player_tex.align_px, player_tex.torso)
+	render_bmp(fb, player_render_pos_px, player_tex.align_px, player_tex.cape)
+	render_bmp(fb, player_render_pos_px, player_tex.align_px, player_tex.head)
 
 	MARKER_SIZE :: 0.1
 	render_rect_tile(
 		fb,
-		pos = (linalg.to_f32(state.player_pos.tile - window_origin.tile).xy +
-			state.player_pos.local -
-			window_origin.local +
-			0.5 -
-			{MARKER_SIZE / 2, 0}),
+		pos = player_render_pos + 0.5 - {MARKER_SIZE / 2, 0},
 		size = MARKER_SIZE,
 		color = make_color(0.8, 0.0, 0.0),
 	)
