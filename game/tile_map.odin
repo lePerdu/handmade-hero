@@ -283,7 +283,7 @@ can_move_in_tile_map_norm :: proc(tile_map: Tile_Map, pos: World_Pos) -> bool {
 }
 
 can_move_in_tile_map :: proc(tile_map: Tile_Map, pos: World_Pos) -> bool {
-	return can_move_in_tile_map_norm(tile_map, normalize_pos(pos)) || true
+	return can_move_in_tile_map_norm(tile_map, normalize_pos(pos))
 }
 
 make_static_tile_map :: proc "contextless" (

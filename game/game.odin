@@ -2,7 +2,6 @@ package game
 
 import "base:runtime"
 import "core:fmt"
-import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
@@ -18,10 +17,11 @@ State :: struct {
 	world: World,
 	camera_pos: World_Pos,
 	player_pos: World_Pos,
-	player_dir: Player_Dir,
+	player_vel: [2]f32,
+	player_face_dir: Direction,
 	world_arena: mem.Arena,
 	background_texture: Bmp_Image,
-	player_textures: [Player_Dir]Player_Textures,
+	player_textures: [Direction]Player_Textures,
 	player_shadow_texture: Bmp_Image,
 }
 
@@ -36,7 +36,7 @@ Player_Textures :: struct {
 	align_px: [2]i32,
 }
 
-Player_Dir :: enum {
+Direction :: enum {
 	Right,
 	Back,
 	Left,
@@ -81,7 +81,8 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 			tile = {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
 			local = 0,
 		}
-		state.player_dir = .Front
+		state.player_vel = 0
+		state.player_face_dir = .Front
 
 		state.background_texture = debug_load_bmp(
 			memory,
@@ -242,40 +243,48 @@ handmade_game_update :: proc "contextless" (
 	state := get_game_state(memory)
 
 	// Sign of the movement: -1, 0, +1
-	player_dir: [2]f32
-	player_delta: f32 = PLAYER_SPEED * 1e-9 * f32(input.dt_ns)
-
-	if input.keyboard[.Space].end_pressed {
-		player_delta *= 3
-	}
+	player_move_dir: [2]f32
 
 	if input.keyboard[.W].end_pressed || input.keyboard[.Up].end_pressed {
-		player_dir[1] += 1
+		player_move_dir[1] += 1
 		// TODO: Base this off the final direction? Prefer a direction?
 		// Pick the last-pressed one?
-		state.player_dir = .Back
+		state.player_face_dir = .Back
 	}
 	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed {
-		player_dir[0] -= 1
-		state.player_dir = .Left
+		player_move_dir[0] -= 1
+		state.player_face_dir = .Left
 	}
 	if input.keyboard[.S].end_pressed || input.keyboard[.Down].end_pressed {
-		player_dir[1] -= 1
-		state.player_dir = .Front
+		player_move_dir[1] -= 1
+		state.player_face_dir = .Front
 	}
 	if input.keyboard[.D].end_pressed || input.keyboard[.Right].end_pressed {
-		player_dir[0] += 1
-		state.player_dir = .Right
+		player_move_dir[0] += 1
+		state.player_face_dir = .Right
 	}
 
-	// Scale diagonal movement
-	coord_delta := player_delta
-	if player_dir[0] != 0 && player_dir[1] != 0 {
-		coord_delta *= math.sqrt(f32(0.5))
+	dt_sec := f32(input.dt_ns) * 1e-9
+
+	max_speed := PLAYER_MAX_SPEED
+	if input.keyboard[.Space].end_pressed {
+		max_speed *= 3
 	}
+
+	player_move_dv :=
+		PLAYER_MOVE_ACC * dt_sec * linalg.normalize0(player_move_dir)
+	friction_dv := linalg.clamp_length(
+		PLAYER_FRICTION * dt_sec * linalg.normalize0(state.player_vel),
+		linalg.length(state.player_vel),
+	)
+
+	state.player_vel = linalg.clamp_length(
+		state.player_vel + player_move_dv - friction_dv,
+		max_speed,
+	)
 
 	new_pos := state.player_pos
-	new_pos.local += player_dir * coord_delta
+	new_pos.local += state.player_vel * dt_sec
 
 	old_tile_pos := state.player_pos.tile
 	if can_move_in_tile_map(
@@ -291,6 +300,8 @@ handmade_game_update :: proc "contextless" (
 		   offset_pos(new_pos, 0, PLAYER_COLLISION_HEIGHT_TILES),
 	   ) {
 		state.player_pos = normalize_pos(new_pos)
+	} else {
+		state.player_vel = 0
 	}
 
 	if state.player_pos.tile != old_tile_pos {
@@ -305,14 +316,20 @@ handmade_game_update :: proc "contextless" (
 		}
 	}
 
-	state.camera_pos = World_Pos {
-		// Move camera by window-sized chunks
-		// tile = (state.player_pos.tile / VIEW_TILES_DIMS) *
-		// 	VIEW_TILES_DIMS + VIEW_TILES_DIMS / 2,
-		// local = 0,
-		// Center player
-		tile = state.player_pos.tile,
-		local = state.player_pos.local,
+	MOVE_CAMERA_IN_CHUNKS :: true
+	if MOVE_CAMERA_IN_CHUNKS {
+		state.camera_pos = World_Pos {
+			// Move camera by window-sized chunks
+			tile = (state.player_pos.tile / VIEW_TILES_DIMS) *
+				VIEW_TILES_DIMS + VIEW_TILES_DIMS / 2,
+			local = 0,
+		}
+	} else {
+		state.camera_pos = World_Pos {
+			// Center player
+			tile = state.player_pos.tile,
+			local = state.player_pos.local,
+		}
 	}
 }
 
@@ -322,7 +339,12 @@ TILE_OFFSET_PX :: [2]f32{-TILE_SIZE_PX / 2, 0}
 PLAYER_WIDTH: f32 : 0.7
 PLAYER_HEIGHT: f32 : 1
 PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.5
-PLAYER_SPEED: f32 : 3 // tile/sec
+PLAYER_MAX_SPEED: f32 : 6 // tile/sec
+PLAYER_FRICTION: f32 : 60 // tile/sec^2
+// Include friction, since it is always acting against movement acceleration
+// TODO: Only apply friction in non-movement direction?
+// TODO: Use drag force instead of constant friction?
+PLAYER_MOVE_ACC: f32 : PLAYER_FRICTION + 30 // tile/sec^2
 
 WINDOW_TILES_WIDTH :: 16
 WINDOW_TILES_HEIGHT :: 9
@@ -544,7 +566,7 @@ handmade_game_render :: proc "contextless" (
 		}
 	}
 
-	player_tex := state.player_textures[state.player_dir]
+	player_tex := state.player_textures[state.player_face_dir]
 
 	player_render_pos := world_pos_xy(
 		world_pos_sub(state.player_pos, window_origin),
