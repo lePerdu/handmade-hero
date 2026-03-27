@@ -3,6 +3,13 @@
     "enabled": true,
   },
   "always_treat_brackets_as_autoclosed": true,
-  "disable_ai": true,
   "wrap_guides": [80],
+  "languages": {
+    "Odin": {
+      "show_edit_predictions": false,
+    },
+    "Zig": {
+      "show_edit_predictions": false,
+    },
+  },
 }
