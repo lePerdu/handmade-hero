@@ -103,11 +103,10 @@ pos_is_normalized :: proc(pos: World_Pos) -> bool {
 	return in_bounds(pos.local, -0.5, 0.5)
 }
 
-offset_pos :: proc(pos: World_Pos, x, y: f32) -> World_Pos {
-	pos := pos
-	pos.local.x += x
-	pos.local.y += y
-	return pos
+offset_pos :: proc(pos: World_Pos, delta: [2]f32) -> World_Pos {
+	res := pos
+	res.local += delta
+	return res
 }
 
 Tile :: enum u8 {

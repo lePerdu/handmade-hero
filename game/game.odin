@@ -247,17 +247,16 @@ handmade_game_update :: proc "contextless" (
 
 	if input.keyboard[.W].end_pressed || input.keyboard[.Up].end_pressed {
 		player_move_dir[1] += 1
-		// TODO: Base this off the final direction? Prefer a direction?
-		// Pick the last-pressed one?
 		state.player_face_dir = .Back
-	}
-	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed {
-		player_move_dir[0] -= 1
-		state.player_face_dir = .Left
 	}
 	if input.keyboard[.S].end_pressed || input.keyboard[.Down].end_pressed {
 		player_move_dir[1] -= 1
 		state.player_face_dir = .Front
+	}
+	// Prefer left/right for face_dir
+	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed {
+		player_move_dir[0] -= 1
+		state.player_face_dir = .Left
 	}
 	if input.keyboard[.D].end_pressed || input.keyboard[.Right].end_pressed {
 		player_move_dir[0] += 1
@@ -283,26 +282,44 @@ handmade_game_update :: proc "contextless" (
 		max_speed,
 	)
 
-	new_pos := state.player_pos
-	new_pos.local += state.player_vel * dt_sec
+	dp := state.player_vel * dt_sec
+
+	if (dp.x > 0 &&
+		   !can_move_in_tile_map(
+				   state.world.tile_map,
+				   offset_pos(state.player_pos, {dp.x + PLAYER_WIDTH / 2, 0}),
+			   )) ||
+	   (dp.x < 0 &&
+			   !can_move_in_tile_map(
+					   state.world.tile_map,
+					   offset_pos(
+						   state.player_pos,
+						   {dp.x - PLAYER_WIDTH / 2, 0},
+					   ),
+				   )) {
+		dp.x = 0
+		state.player_vel.x *= -PLAYER_COLLIDE_COEF
+	}
+
+	if (dp.y > 0 &&
+		   !can_move_in_tile_map(
+				   state.world.tile_map,
+				   offset_pos(
+					   state.player_pos,
+					   {0, dp.y + PLAYER_COLLISION_HEIGHT_TILES},
+				   ),
+			   )) ||
+	   (dp.y < 0 &&
+			   !can_move_in_tile_map(
+					   state.world.tile_map,
+					   offset_pos(state.player_pos, {0, dp.y}),
+				   )) {
+		dp.y = 0
+		state.player_vel.y *= -PLAYER_COLLIDE_COEF
+	}
 
 	old_tile_pos := state.player_pos.tile
-	if can_move_in_tile_map(
-		   state.world.tile_map,
-		   offset_pos(new_pos, -PLAYER_WIDTH / 2, 0),
-	   ) &&
-	   can_move_in_tile_map(
-		   state.world.tile_map,
-		   offset_pos(new_pos, PLAYER_WIDTH / 2, 0),
-	   ) &&
-	   can_move_in_tile_map(
-		   state.world.tile_map,
-		   offset_pos(new_pos, 0, PLAYER_COLLISION_HEIGHT_TILES),
-	   ) {
-		state.player_pos = normalize_pos(new_pos)
-	} else {
-		state.player_vel = 0
-	}
+	state.player_pos = normalize_pos(offset_pos(state.player_pos, dp))
 
 	if state.player_pos.tile != old_tile_pos {
 		#partial switch tile_map_get_tile_or_default(
@@ -340,11 +357,12 @@ PLAYER_WIDTH: f32 : 0.7
 PLAYER_HEIGHT: f32 : 1
 PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.5
 PLAYER_MAX_SPEED: f32 : 6 // tile/sec
-PLAYER_FRICTION: f32 : 60 // tile/sec^2
+PLAYER_FRICTION: f32 : 40 // tile/sec^2
 // Include friction, since it is always acting against movement acceleration
 // TODO: Only apply friction in non-movement direction?
 // TODO: Use drag force instead of constant friction?
 PLAYER_MOVE_ACC: f32 : PLAYER_FRICTION + 30 // tile/sec^2
+PLAYER_COLLIDE_COEF: f32 : 0.5
 
 WINDOW_TILES_WIDTH :: 16
 WINDOW_TILES_HEIGHT :: 9
