@@ -65,7 +65,7 @@ GAME_TEMP_MEMORY_SIZE :: 1 << 30
 GAME_PERSIST_MEM_ADDR: uintptr : 0x0000_1000_0000_0000
 
 main :: proc() {
-	context.logger = log.create_console_logger(lowest = .Info)
+	context.logger = log.create_console_logger(lowest = .Debug)
 
 	state: State
 	setup_paths(&state)
@@ -809,13 +809,32 @@ display_init :: proc(state: ^Display_State) -> bool {
 	)
 	_ = wayland.wl_surface_commit(&state.conn, state.wl_surface)
 
-	state.current_window_state = {
+	// Prepare default settings, but don't use them until xdg_surface.configure
+	state.current_window_state = {}
+	state.buffered_window_state = {
 		width = DEFAULT_WINDOW_WIDTH,
 		height = DEFAULT_WINDOW_HEIGHT,
 		fullscreen = false,
 	}
-	state.buffered_window_state = state.current_window_state
-	display_setup_buffers(state)
+
+	// Wait for xdg_surface.configure, so that the window is ready for rendering
+	// TODO: Introduce a more explicit check? This relies on
+	// `display_setup_buffers` being called in the `xdg_surface.configure`
+	// handler
+	for state.buffers[0].wl_buffer == wayland.OBJECT_ID_NIL {
+		wayland_socket_poll := posix.pollfd {
+			fd = state.conn.socket_fd,
+			events = {.IN, .OUT},
+		}
+		switch poll_res := posix.poll(&wayland_socket_poll, 1, -1); poll_res {
+		case 0: // timeout
+		case -1:
+			// error
+			log.error("failed to poll wayland socket:", posix.errno())
+		case:
+			process_wayland_messages(state)
+		}
+	}
 
 	return true
 }
@@ -901,7 +920,7 @@ display_get_back_buffer :: proc(
 	ok: bool,
 ) {
 	b := &state.buffers[state.back_buffer_index]
-	if b.state == .Attached {
+	if b.state == .Attached || b.wl_buffer == wayland.OBJECT_ID_NIL {
 		return {}, false
 	} else {
 		return b.frame_buffer, true
@@ -1172,6 +1191,13 @@ handle_event :: proc(
 		switch opcode {
 		case wayland.WL_SURFACE_PREFERRED_BUFFER_SCALE_EVENT_OPCODE:
 			_ = wayland.wl_surface_preferred_buffer_scale_parse(
+				&state.conn,
+				message,
+			) or_return
+			// TODO: Impl
+			return nil
+		case wayland.WL_SURFACE_PREFERRED_BUFFER_TRANSFORM_EVENT_OPCODE:
+			_ = wayland.wl_surface_preferred_buffer_transform_parse(
 				&state.conn,
 				message,
 			) or_return
@@ -1779,10 +1805,10 @@ DEFAULT_MMAP_CONFIG :: Alsa_Config {
 	access_mode = .MMAP_INTERLEAVED,
 }
 
-// Using "default" or "pipewire" leads to buzzing sound and blocks system
-// audio while paused in the debugger. Pulse audio forces using
+// On some systems, using "default" or "pipewire" leads to buzzing sound and
+// blocks system audio while paused in the debugger. Pulse audio forces using
 // RW_INTERLEAVED, but that's alright for now
-ALSA_CONFIG :: PULSEAUDIO_CONFIG
+ALSA_CONFIG :: DEFAULT_MMAP_CONFIG
 
 when ALSA_CONFIG.access_mode == .RW_INTERLEAVED {
 	_Audio_Buffer_Field :: []game_api.Audio_Frame
