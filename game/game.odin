@@ -282,6 +282,7 @@ handmade_game_update :: proc "contextless" (
 		max_speed,
 	)
 
+	old_tile_pos := state.player_pos.tile
 	dp := state.player_vel * dt_sec
 
 	if (dp.x > 0 &&
@@ -318,8 +319,27 @@ handmade_game_update :: proc "contextless" (
 		state.player_vel.y *= -PLAYER_COLLIDE_COEF
 	}
 
-	old_tile_pos := state.player_pos.tile
 	state.player_pos = normalize_pos(offset_pos(state.player_pos, dp))
+
+	/* TODO: Finish better collision detection
+	target_new_player_pos := normalize_pos(offset_pos(state.player_pos, dp))
+
+	best_new_player_pos := state.player_pos
+	best_dist2 := world_pos_dist2(target_new_player_pos, best_new_player_pos)
+
+	tile_z := state.player_pos.tile.z
+	for tile_y in 0 ..< i32(1) {
+		for tile_x in 0 ..< i32(1) {
+			tile, tile_exists := tile_map_get_tile_ptr(
+				state.world.tile_map,
+				{tile_x, tile_y, tile_z},
+			)
+			if tile_exists && tile^ != .Wall {
+
+			}
+		}
+	}
+	*/
 
 	if state.player_pos.tile != old_tile_pos {
 		#partial switch tile_map_get_tile_or_default(

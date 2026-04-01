@@ -1,6 +1,7 @@
 package game
 
 import "base:intrinsics"
+import "core:math"
 import "core:math/linalg"
 import "core:slice"
 
@@ -27,6 +28,16 @@ world_pos_sub :: proc(a, b: World_Pos) -> World_Pos {
 // `pos.tile` should be relatively small to avoid precision errors
 world_pos_xy :: proc(pos: World_Pos) -> [2]f32 {
 	return linalg.to_f32(pos.tile).xy + pos.local
+}
+
+world_pos_dist2 :: proc(a, b: World_Pos) -> f32 {
+	delta := world_pos_sub(a, b)
+	delta_xy := world_pos_xy(delta)
+	return linalg.length2([3]f32{delta_xy.x, delta_xy.y, f32(delta.tile.z)})
+}
+
+world_pos_dist :: proc(a, b: World_Pos) -> f32 {
+	return math.sqrt(world_pos_dist2(a, b))
 }
 
 normalize_pos :: proc(pos: World_Pos) -> World_Pos {
@@ -221,8 +232,8 @@ tile_map_get_tile_in_chunk :: proc(
 	tile: ^Tile,
 	ok: bool,
 ) {
-	tile_map := tile_map_get_chunk(tile_map, chunk_pos) or_return
-	return tile_chunk_get_ptr(tile_map^, tile_pos)
+	chunk := tile_map_get_chunk(tile_map, chunk_pos) or_return
+	return tile_chunk_get_ptr(chunk^, tile_pos)
 }
 
 tile_map_get_tile_ptr :: proc(
