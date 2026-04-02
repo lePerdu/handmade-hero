@@ -65,7 +65,7 @@ GAME_TEMP_MEMORY_SIZE :: 1 << 30
 GAME_PERSIST_MEM_ADDR: uintptr : 0x0000_1000_0000_0000
 
 main :: proc() {
-	context.logger = log.create_console_logger(lowest = .Debug)
+	context.logger = log.create_console_logger(lowest = .Info)
 
 	state: State
 	setup_paths(&state)
@@ -1490,18 +1490,6 @@ handle_seat_capabilities :: proc(
 	}
 }
 
-// TODO: Pull these (and others) from linux EVDEV header
-KEY_W :: 17
-KEY_A :: 30
-KEY_S :: 31
-KEY_D :: 32
-
-KEY_UP :: 103
-KEY_LEFT :: 105
-KEY_DOWN :: 108
-KEY_RIGHT :: 106
-KEY_SPACE :: 57
-
 handle_keyboard_reapeat_info :: proc(
 	state: ^Display_State,
 	event: wayland.Wl_Keyboard_Repeat_Info_Event,
@@ -1518,9 +1506,30 @@ handle_keyboard_keymap :: proc(
 }
 
 scancode_to_game_key :: proc(code: u32) -> (game_api.Key, bool) {
+	// TODO: Pull these (and others) from linux EVDEV header
+	KEY_Q :: 16
+	KEY_W :: 17
+	KEY_E :: 18
+	KEY_A :: 30
+	KEY_S :: 31
+	KEY_D :: 32
+
+	KEY_UP :: 103
+	KEY_LEFT :: 105
+	KEY_DOWN :: 108
+	KEY_RIGHT :: 106
+	KEY_SPACE :: 57
+	KEY_ENTER :: 28
+	KEY_BACKSPACE :: 14
+	KEY_TAB :: 15
+
 	switch code {
+	case KEY_Q:
+		return .Q, true
 	case KEY_W:
 		return .W, true
+	case KEY_E:
+		return .E, true
 	case KEY_A:
 		return .A, true
 	case KEY_S:
@@ -1537,27 +1546,33 @@ scancode_to_game_key :: proc(code: u32) -> (game_api.Key, bool) {
 		return .Right, true
 	case KEY_SPACE:
 		return .Space, true
+	case KEY_ENTER:
+		return .Enter, true
+	case KEY_BACKSPACE:
+		return .Backspace, true
+	case KEY_TAB:
+		return .Tab, true
 	case:
 		return {}, false
 	}
 }
 
-KEY_1 :: 2
-KEY_2 :: 3
-KEY_3 :: 4
-KEY_4 :: 5
-KEY_5 :: 6
-KEY_6 :: 7
-KEY_7 :: 8
-KEY_8 :: 9
-KEY_9 :: 10
-KEY_0 :: 11
-KEY_L :: 38
-KEY_P :: 25
-KEY_ESC :: 1
-KEY_F11 :: 87
-
 scancode_to_engine_key :: proc(code: u32) -> (Engine_Key, bool) {
+	KEY_1 :: 2
+	KEY_2 :: 3
+	KEY_3 :: 4
+	KEY_4 :: 5
+	KEY_5 :: 6
+	KEY_6 :: 7
+	KEY_7 :: 8
+	KEY_8 :: 9
+	KEY_9 :: 10
+	KEY_0 :: 11
+	KEY_L :: 38
+	KEY_P :: 25
+	KEY_ESC :: 1
+	KEY_F11 :: 87
+
 	switch code {
 	case KEY_1:
 		return .Num_1, true

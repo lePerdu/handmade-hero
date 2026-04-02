@@ -1,6 +1,7 @@
 package game
 
 import "base:runtime"
+import "core:container/intrusive/list"
 import "core:fmt"
 import "core:math/linalg"
 import "core:math/rand"
@@ -16,13 +17,21 @@ State :: struct {
 	initialized: bool,
 	world: World,
 	camera_pos: World_Pos,
-	player_pos: World_Pos,
-	player_vel: [2]f32,
-	player_face_dir: Direction,
+	camera_follow_entity_index: int,
+	entity_buf: [256]Entity,
+	entities: [dynamic]Entity,
+	controller_to_player_entity: [VIRT_CONTROLLER_COUNT]int,
 	world_arena: mem.Arena,
 	background_texture: Bmp_Image,
-	player_textures: [Direction]Player_Textures,
-	player_shadow_texture: Bmp_Image,
+	hero_textures: [Direction]Player_Textures,
+	hero_shadow_texture: Bmp_Image,
+}
+
+Entity :: struct {
+	exists: bool,
+	pos: World_Pos,
+	vel: [2]f32,
+	face_dir: Direction,
 }
 
 World :: struct {
@@ -41,6 +50,18 @@ Direction :: enum {
 	Back,
 	Left,
 	Front,
+}
+
+// Include full/left/right keyboard virtual controllers
+KEYBOARD_FULL_INDEX :: len(api.Input{}.controllers)
+KEYBOARD_LEFT_INDEX :: KEYBOARD_FULL_INDEX + 1
+KEYBOARD_RIGHT_INDEX :: KEYBOARD_FULL_INDEX + 2
+VIRT_CONTROLLER_COUNT :: len(api.Input{}.controllers) + 3
+
+Controller :: struct {
+	// TODO: Store pointer to avoid copying?
+	using _: api.Controller,
+	index: int,
 }
 
 get_game_context :: proc "contextless" (
@@ -71,29 +92,44 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	assert(len(memory.persistent) >= size_of(State))
 	state := (^State)(raw_data(memory.persistent))
 	if !state.initialized {
+		state^ = {}
 		mem.arena_init(&state.world_arena, memory.persistent[size_of(State):])
 		gen_world(state)
 		state.camera_pos = {
 			tile = {VIEW_TILES_WIDTH / 2, VIEW_TILES_HEIGHT / 2, 0},
 			local = 0,
 		}
-		state.player_pos = {
-			tile = {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
-			local = 0,
+		state.entities = mem.buffer_from_slice(state.entity_buf[:])
+		// TODO: Set exists = true in add_entity?
+		nil_entity, nil_entity_index :=
+			add_entity(state) or_else panic("failed to create nil entity")
+		assert(nil_entity_index == 0)
+		assert(!nil_entity.exists)
+
+		if player_entity, index, ok := add_entity(state); ok {
+			player_entity^ = {
+				exists = true,
+				face_dir = .Front,
+				pos = {
+					tile = {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
+				},
+			}
+			state.controller_to_player_entity[KEYBOARD_FULL_INDEX] = index
+			state.camera_follow_entity_index = index
+		} else {
+			panic("failed to add player entity")
 		}
-		state.player_vel = 0
-		state.player_face_dir = .Front
 
 		state.background_texture = debug_load_bmp(
 			memory,
 			"assets/early_data/test/test_background.bmp",
 		)
 
-		state.player_textures[.Right] = load_player_textures(memory, "right")
-		state.player_textures[.Back] = load_player_textures(memory, "back")
-		state.player_textures[.Left] = load_player_textures(memory, "left")
-		state.player_textures[.Front] = load_player_textures(memory, "front")
-		state.player_shadow_texture = debug_load_bmp(
+		state.hero_textures[.Right] = load_hero_textures(memory, "right")
+		state.hero_textures[.Back] = load_hero_textures(memory, "back")
+		state.hero_textures[.Left] = load_hero_textures(memory, "left")
+		state.hero_textures[.Front] = load_hero_textures(memory, "front")
+		state.hero_shadow_texture = debug_load_bmp(
 			memory,
 			"assets/early_data/test/test_hero_shadow.bmp",
 		)
@@ -103,7 +139,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	return state
 }
 
-load_player_textures :: proc(
+load_hero_textures :: proc(
 	memory: api.Memory,
 	dir: string,
 ) -> Player_Textures {
@@ -234,6 +270,69 @@ gen_world :: proc(state: ^State) {
 	}
 }
 
+keyboard_controller_full :: proc(
+	keyboard: api.Keyboard_Input,
+) -> api.Controller {
+	return {
+		buttons = {
+			.Move_Up = keyboard[.W],
+			.Move_Left = keyboard[.A],
+			.Move_Down = keyboard[.S],
+			.Move_Right = keyboard[.D],
+			.Action_Up = keyboard[.Up],
+			.Action_Left = keyboard[.Left],
+			.Action_Down = keyboard[.Down],
+			.Action_Right = keyboard[.Right],
+			.Back = keyboard[.Backspace],
+			.Start = keyboard[.Space],
+			.Shoulder_Left = keyboard[.Q],
+			.Shoulder_Right = keyboard[.E],
+		},
+	}
+}
+
+keyboard_controller_left :: proc(
+	keyboard: api.Keyboard_Input,
+) -> api.Controller {
+	return {
+		buttons = {
+			.Move_Up = keyboard[.W],
+			.Move_Left = keyboard[.A],
+			.Move_Down = keyboard[.S],
+			.Move_Right = keyboard[.D],
+			.Back = keyboard[.Tab],
+			.Start = keyboard[.Space],
+			.Action_Up = {},
+			.Action_Left = {},
+			.Action_Down = {},
+			.Action_Right = {},
+			.Shoulder_Left = {},
+			.Shoulder_Right = {},
+		},
+	}
+}
+
+keyboard_controller_right :: proc(
+	keyboard: api.Keyboard_Input,
+) -> api.Controller {
+	return {
+		buttons = {
+			.Move_Up = keyboard[.Up],
+			.Move_Left = keyboard[.Left],
+			.Move_Down = keyboard[.Down],
+			.Move_Right = keyboard[.Right],
+			.Back = keyboard[.Backspace],
+			.Start = keyboard[.Enter],
+			.Action_Up = {},
+			.Action_Left = {},
+			.Action_Down = {},
+			.Action_Right = {},
+			.Shoulder_Left = {},
+			.Shoulder_Right = {},
+		},
+	}
+}
+
 @(export)
 handmade_game_update :: proc "contextless" (
 	memory: api.Memory,
@@ -242,92 +341,201 @@ handmade_game_update :: proc "contextless" (
 	context = get_game_context(memory)
 	state := get_game_state(memory)
 
+	dt_sec := f32(input.dt_ns) * 1e-9
+
+	// For now, just support 1 keyboard
+	handle_controller_input(
+		state,
+		dt_sec,
+		KEYBOARD_FULL_INDEX,
+		keyboard_controller_full(input.keyboard),
+	)
+	// for controller, index in input.controllers {
+	// 	handle_controller_input(state, dt_sec, index, controller)
+	// }
+	// handle_controller_input(
+	// 	state,
+	// 	dt_sec,
+	// 	KEYBOARD_LEFT_INDEX,
+	// 	keyboard_controller_left(input.keyboard),
+	// )
+	// handle_controller_input(
+	// 	state,
+	// 	dt_sec,
+	// 	KEYBOARD_RIGHT_INDEX,
+	// 	keyboard_controller_right(input.keyboard),
+	// )
+
+	if camera_follow_target, ok := get_entity(
+		state,
+		state.camera_follow_entity_index,
+	); ok {
+		target_pos := camera_follow_target.pos
+		MOVE_CAMERA_IN_CHUNKS :: true
+		if MOVE_CAMERA_IN_CHUNKS {
+			state.camera_pos = World_Pos {
+				// Move camera by window-sized chunks
+				tile = (target_pos.tile / VIEW_TILES_DIMS) *
+					VIEW_TILES_DIMS + VIEW_TILES_DIMS / 2,
+				local = 0,
+			}
+		} else {
+			state.camera_pos = World_Pos {
+				// Center player
+				tile = target_pos.tile,
+				local = target_pos.local,
+			}
+		}
+	}
+}
+
+add_entity :: proc(state: ^State) -> (entity: ^Entity, index: int, ok: bool) {
+	index = len(state.entities)
+	if _, err := append_nothing(&state.entities); err != nil {
+		return
+	}
+	entity = &state.entities[index]
+	ok = true
+	return
+}
+
+get_entity :: proc(state: ^State, index: int) -> (entity: ^Entity, ok: bool) {
+	entity = slice.get_ptr(state.entities[:], index) or_return
+	if !entity.exists do return nil, false
+	return entity, true
+}
+
+handle_controller_input :: proc(
+	state: ^State,
+	dt_sec: f32,
+	controller_index: int,
+	controller: api.Controller,
+) {
+	entity_index := state.controller_to_player_entity[controller_index]
+	if entity_index == 0 {
+		return
+		/*
+		if api.button_input_pressed(controller.buttons[.Start]) {
+			new_player: ^Entity
+			new_player, entity_index =
+				add_entity(state) or_else panic(
+					"failed to add player entity for controller",
+				)
+			new_player^ = {
+				exists = true,
+				face_dir = .Front,
+				pos = {
+					tile = {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
+				},
+			}
+			state.controller_to_player_entity[controller_index] = entity_index
+			if state.camera_follow_entity_index == 0 {
+				state.camera_follow_entity_index = entity_index
+			}
+		} else {
+			return
+		}
+		*/
+	}
+
+	update_player_movement(state, entity_index, dt_sec, controller)
+}
+
+update_player_movement :: proc(
+	state: ^State,
+	entity_index: int,
+	dt_sec: f32,
+	controller: api.Controller,
+) {
+	player := &state.entities[entity_index]
+
 	// Sign of the movement: -1, 0, +1
 	player_move_dir: [2]f32
 
-	if input.keyboard[.W].end_pressed || input.keyboard[.Up].end_pressed {
-		player_move_dir[1] += 1
-		state.player_face_dir = .Back
+	if controller.buttons[.Move_Up].end_pressed {
+		player_move_dir.y += 1
 	}
-	if input.keyboard[.S].end_pressed || input.keyboard[.Down].end_pressed {
-		player_move_dir[1] -= 1
-		state.player_face_dir = .Front
+	if controller.buttons[.Move_Left].end_pressed {
+		player_move_dir.x -= 1
 	}
-	// Prefer left/right for face_dir
-	if input.keyboard[.A].end_pressed || input.keyboard[.Left].end_pressed {
-		player_move_dir[0] -= 1
-		state.player_face_dir = .Left
+	if controller.buttons[.Move_Down].end_pressed {
+		player_move_dir.y -= 1
 	}
-	if input.keyboard[.D].end_pressed || input.keyboard[.Right].end_pressed {
-		player_move_dir[0] += 1
-		state.player_face_dir = .Right
+	if controller.buttons[.Move_Right].end_pressed {
+		player_move_dir.x += 1
 	}
-
-	dt_sec := f32(input.dt_ns) * 1e-9
 
 	max_speed := PLAYER_MAX_SPEED
-	if input.keyboard[.Space].end_pressed {
+	if controller.buttons[.Action_Up].end_pressed {
 		max_speed *= 3
 	}
 
 	player_move_dv :=
 		PLAYER_MOVE_ACC * dt_sec * linalg.normalize0(player_move_dir)
 	friction_dv := linalg.clamp_length(
-		PLAYER_FRICTION * dt_sec * linalg.normalize0(state.player_vel),
-		linalg.length(state.player_vel),
+		PLAYER_FRICTION * dt_sec * linalg.normalize0(player.vel),
+		linalg.length(player.vel),
 	)
 
-	state.player_vel = linalg.clamp_length(
-		state.player_vel + player_move_dv - friction_dv,
+	// Base face_dir on the input accel rather than total accel so it doens't
+	// flip back and forth when bouncing
+	if player_move_dv == 0 {
+		// Leave face_dir as-is
+	} else if abs(player_move_dv.x) >= abs(player_move_dv.y) {
+		// Prefer x accel if
+		player.face_dir = player_move_dv.x > 0 ? .Right : .Left
+	} else {
+		player.face_dir = player_move_dv.y > 0 ? .Back : .Front
+	}
+
+	player.vel = linalg.clamp_length(
+		player.vel + player_move_dv - friction_dv,
 		max_speed,
 	)
 
-	old_tile_pos := state.player_pos.tile
-	dp := state.player_vel * dt_sec
+	old_tile_pos := player.pos.tile
+	dp := player.vel * dt_sec
 
 	if (dp.x > 0 &&
 		   !can_move_in_tile_map(
 				   state.world.tile_map,
-				   offset_pos(state.player_pos, {dp.x + PLAYER_WIDTH / 2, 0}),
+				   offset_pos(player.pos, {dp.x + PLAYER_WIDTH / 2, 0}),
 			   )) ||
 	   (dp.x < 0 &&
 			   !can_move_in_tile_map(
 					   state.world.tile_map,
-					   offset_pos(
-						   state.player_pos,
-						   {dp.x - PLAYER_WIDTH / 2, 0},
-					   ),
+					   offset_pos(player.pos, {dp.x - PLAYER_WIDTH / 2, 0}),
 				   )) {
 		dp.x = 0
-		state.player_vel.x *= -PLAYER_COLLIDE_COEF
+		player.vel.x *= -PLAYER_COLLIDE_COEF
 	}
 
 	if (dp.y > 0 &&
 		   !can_move_in_tile_map(
 				   state.world.tile_map,
 				   offset_pos(
-					   state.player_pos,
+					   player.pos,
 					   {0, dp.y + PLAYER_COLLISION_HEIGHT_TILES},
 				   ),
 			   )) ||
 	   (dp.y < 0 &&
 			   !can_move_in_tile_map(
 					   state.world.tile_map,
-					   offset_pos(state.player_pos, {0, dp.y}),
+					   offset_pos(player.pos, {0, dp.y}),
 				   )) {
 		dp.y = 0
-		state.player_vel.y *= -PLAYER_COLLIDE_COEF
+		player.vel.y *= -PLAYER_COLLIDE_COEF
 	}
 
-	state.player_pos = normalize_pos(offset_pos(state.player_pos, dp))
+	player.pos = normalize_pos(offset_pos(player.pos, dp))
 
 	/* TODO: Finish better collision detection
-	target_new_player_pos := normalize_pos(offset_pos(state.player_pos, dp))
+	target_new_player_pos := normalize_pos(offset_pos(player.pos, dp))
 
-	best_new_player_pos := state.player_pos
+	best_new_player_pos := player.pos
 	best_dist2 := world_pos_dist2(target_new_player_pos, best_new_player_pos)
 
-	tile_z := state.player_pos.tile.z
+	tile_z := player.pos.tile.z
 	for tile_y in 0 ..< i32(1) {
 		for tile_x in 0 ..< i32(1) {
 			tile, tile_exists := tile_map_get_tile_ptr(
@@ -341,31 +549,15 @@ handmade_game_update :: proc "contextless" (
 	}
 	*/
 
-	if state.player_pos.tile != old_tile_pos {
+	if player.pos.tile != old_tile_pos {
 		#partial switch tile_map_get_tile_or_default(
 			state.world.tile_map,
-			state.player_pos.tile,
+			player.pos.tile,
 		) {
 		case .Stair_Up:
-			state.player_pos.tile.z += 1
+			player.pos.tile.z += 1
 		case .Stair_Down:
-			state.player_pos.tile.z -= 1
-		}
-	}
-
-	MOVE_CAMERA_IN_CHUNKS :: true
-	if MOVE_CAMERA_IN_CHUNKS {
-		state.camera_pos = World_Pos {
-			// Move camera by window-sized chunks
-			tile = (state.player_pos.tile / VIEW_TILES_DIMS) *
-				VIEW_TILES_DIMS + VIEW_TILES_DIMS / 2,
-			local = 0,
-		}
-	} else {
-		state.camera_pos = World_Pos {
-			// Center player
-			tile = state.player_pos.tile,
-			local = state.player_pos.local,
+			player.pos.tile.z -= 1
 		}
 	}
 }
@@ -548,8 +740,6 @@ handmade_game_render :: proc "contextless" (
 
 	render_bmp(fb, 0, 0, state.background_texture)
 
-	assert(pos_is_normalized(state.player_pos))
-
 	// state.camera_pos, adjusted so that it points to the bottom-left corner
 	// instead of the center
 	window_origin := World_Pos {
@@ -561,7 +751,8 @@ handmade_game_render :: proc "contextless" (
 	overdraw_x: i32 = window_origin.local.x == 0.0 ? 0 : 1
 	overdraw_y: i32 = window_origin.local.y == 0.0 ? 0 : 1
 	for window_row in -overdraw_y ..< i32(VIEW_TILES_HEIGHT) + overdraw_y {
-		for window_col in -overdraw_x ..< i32(VIEW_TILES_WIDTH) + overdraw_x {
+		col_loop: for window_col in -overdraw_x ..< i32(VIEW_TILES_WIDTH) +
+			overdraw_x {
 			window_pos := Global_Tile_Pos{window_col, window_row, 0}
 			tile_pos := window_pos + window_origin.tile
 			tile_val, ok := tile_map_get_tile_ptr(
@@ -576,8 +767,7 @@ handmade_game_render :: proc "contextless" (
 			color: Color
 			switch tile_val^ {
 			case .Empty:
-				// TODO: How to continue out of a switch?
-				color = make_color(0.1)
+				continue col_loop
 			case .Wall:
 				color = make_color(0.8)
 			case .Door:
@@ -587,12 +777,6 @@ handmade_game_render :: proc "contextless" (
 				color = make_color(r = 0.0, g = 0.4, b = 0.0)
 			case .Stair_Down:
 				color = make_color(r = 0.0, g = 0.0, b = 0.4)
-			}
-			// Debug: show current player tile
-			if state.player_pos.tile == tile_pos {
-				color = make_color(1.0)
-			} else if tile_val^ == .Empty {
-				continue
 			}
 
 			render_rect_tile(
@@ -604,33 +788,46 @@ handmade_game_render :: proc "contextless" (
 		}
 	}
 
-	player_tex := state.player_textures[state.player_face_dir]
+	for entity in state.entities {
+		if !entity.exists do continue
+		if entity.pos.tile.z != state.camera_pos.tile.z do continue
+		hero_tex := state.hero_textures[entity.face_dir]
 
-	player_render_pos := world_pos_xy(
-		world_pos_sub(state.player_pos, window_origin),
-	)
-	player_render_pos_px := player_render_pos * TILE_SIZE_PX
-	// TODO: Calc render width/height based on image size? Scale bitmaps to fit
-	// pre-defined dimensionts?
-	render_bmp(
-		fb,
-		player_render_pos_px,
-		// TODO: Is this the proper aling position for the shadow in all
-		// directions?
-		player_tex.align_px,
-		state.player_shadow_texture,
-	)
-	render_bmp(fb, player_render_pos_px, player_tex.align_px, player_tex.torso)
-	render_bmp(fb, player_render_pos_px, player_tex.align_px, player_tex.cape)
-	render_bmp(fb, player_render_pos_px, player_tex.align_px, player_tex.head)
+		assert(pos_is_normalized(entity.pos))
 
-	MARKER_SIZE :: 0.1
-	render_rect_tile(
-		fb,
-		pos = player_render_pos + 0.5 - {MARKER_SIZE / 2, 0},
-		size = MARKER_SIZE,
-		color = make_color(0.8, 0.0, 0.0),
-	)
+		render_pos := world_pos_xy(world_pos_sub(entity.pos, window_origin))
+		// Mark entity's tile
+		render_rect_tile(
+			fb,
+			pos = linalg.to_f32(entity.pos.tile.xy - window_origin.tile.xy),
+			size = 1,
+			color = make_color(1.0),
+		)
+
+		render_pos_px := render_pos * TILE_SIZE_PX
+		// TODO: Calc render width/height based on image size? Scale bitmaps to fit
+		// pre-defined dimensionts?
+		render_bmp(
+			fb,
+			render_pos_px,
+			// TODO: Is this the proper aling position for the shadow in all
+			// directions?
+			hero_tex.align_px,
+			state.hero_shadow_texture,
+		)
+		render_bmp(fb, render_pos_px, hero_tex.align_px, hero_tex.torso)
+		render_bmp(fb, render_pos_px, hero_tex.align_px, hero_tex.cape)
+		render_bmp(fb, render_pos_px, hero_tex.align_px, hero_tex.head)
+
+		// Mark entity's position
+		MARKER_SIZE :: 0.1
+		render_rect_tile(
+			fb,
+			pos = render_pos + 0.5 - {MARKER_SIZE / 2, 0},
+			size = MARKER_SIZE,
+			color = make_color(0.8, 0.0, 0.0),
+		)
+	}
 }
 
 Color :: [4]f32

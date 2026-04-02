@@ -50,12 +50,6 @@ dummy_render_audio :: proc "contextless" (
 	buffer: []Audio_Frame,
 ) {}
 
-Input :: struct {
-	dt_ns: i64,
-	keyboard: Keyboard_Input,
-	mouse: Mouse_Input,
-}
-
 Frame_Buffer :: struct {
 	// Size in pixels
 	width, height: u32,
@@ -82,17 +76,51 @@ Audio_Frame :: struct #packed {
 	r: i16,
 }
 
+Input :: struct {
+	dt_ns: i64,
+	keyboard: Keyboard_Input,
+	mouse: Mouse_Input,
+	controllers: [4]Controller,
+}
+
+Controller_Button :: enum {
+	Move_Up,
+	Move_Left,
+	Move_Down,
+	Move_Right,
+	Action_Up,
+	Action_Left,
+	Action_Down,
+	Action_Right,
+	Back,
+	Start,
+	Shoulder_Left,
+	Shoulder_Right,
+}
+
+Controller :: struct {
+	buttons: [Controller_Button]Button_Input,
+	is_analog: bool,
+	left_stick_avg: [2]f32,
+	right_stick_avg: [2]f32,
+}
+
 // Enum of the keys we care about
 Key :: enum {
 	W,
 	A,
 	S,
 	D,
+	Q,
+	E,
 	Up,
 	Left,
-	Right,
 	Down,
+	Right,
 	Space,
+	Enter,
+	Backspace,
+	Tab,
 }
 
 Button_Input :: struct {
