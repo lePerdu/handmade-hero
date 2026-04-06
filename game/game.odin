@@ -3,6 +3,7 @@ package game
 import "base:runtime"
 import "core:container/intrusive/list"
 import "core:fmt"
+import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
@@ -112,6 +113,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 				face_dir = .Front,
 				pos = {
 					tile = {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
+					local = {-0.5, -0.5},
 				},
 			}
 			state.controller_to_player_entity[KEYBOARD_FULL_INDEX] = index
@@ -448,6 +450,12 @@ update_player_movement :: proc(
 	controller: api.Controller,
 ) {
 	player := &state.entities[entity_index]
+	// Save for later after movement computation
+	old_tile_pos := player.pos.tile
+
+	// player.pos.local = 0
+
+	// TODO: Support analog sticks
 
 	// Sign of the movement: -1, 0, +1
 	player_move_dir: [2]f32
@@ -465,89 +473,185 @@ update_player_movement :: proc(
 		player_move_dir.x += 1
 	}
 
+	// Base face_dir on the input accel rather than total accel so it doens't
+	// flip back and forth when bouncing
+	if player_move_dir == 0 {
+		// Leave face_dir as-is
+	} else if abs(player_move_dir.x) >= abs(player_move_dir.y) {
+		// Prefer x accel if
+		player.face_dir = player_move_dir.x > 0 ? .Right : .Left
+	} else {
+		player.face_dir = player_move_dir.y > 0 ? .Back : .Front
+	}
+
 	max_speed := PLAYER_MAX_SPEED
 	if controller.buttons[.Action_Up].end_pressed {
 		max_speed *= 3
 	}
 
-	player_move_dv :=
-		PLAYER_MOVE_ACC * dt_sec * linalg.normalize0(player_move_dir)
-	friction_dv := linalg.clamp_length(
-		PLAYER_FRICTION * dt_sec * linalg.normalize0(player.vel),
-		linalg.length(player.vel),
-	)
+	player_move_acc := PLAYER_MOVE_ACC * linalg.normalize0(player_move_dir)
 
-	// Base face_dir on the input accel rather than total accel so it doens't
-	// flip back and forth when bouncing
-	if player_move_dv == 0 {
-		// Leave face_dir as-is
-	} else if abs(player_move_dv.x) >= abs(player_move_dv.y) {
-		// Prefer x accel if
-		player.face_dir = player_move_dv.x > 0 ? .Right : .Left
-	} else {
-		player.face_dir = player_move_dv.y > 0 ? .Back : .Front
+	collides_wall :: proc(
+		pos: World_Pos,
+		dp: [2]f32,
+		tile_pos: [2]i32,
+		wall_coord: f32,
+		$AXIS: int,
+	) -> (
+		t: f32,
+		collides: bool,
+	) {
+		OTHER_AXIS :: 1 - AXIS
+		rel_pos := linalg.to_f32(tile_pos - pos.tile.xy) - pos.local
+
+		delta := rel_pos[AXIS] + wall_coord
+		// TODO: Remove this check since it's done outside?
+		if math.sign(delta) != math.sign(dp[AXIS]) ||
+		   math.sign(dp[AXIS]) == 0 {
+			return
+		}
+
+		t = delta / dp[AXIS]
+		other_delta := rel_pos[OTHER_AXIS]
+		collides = -0.5 <= other_delta && other_delta <= 0.5
+		return
 	}
 
-	player.vel = linalg.clamp_length(
-		player.vel + player_move_dv - friction_dv,
-		max_speed,
-	)
-
-	old_tile_pos := player.pos.tile
-	dp := player.vel * dt_sec
-
-	if (dp.x > 0 &&
-		   !can_move_in_tile_map(
-				   state.world.tile_map,
-				   offset_pos(player.pos, {dp.x + PLAYER_WIDTH / 2, 0}),
-			   )) ||
-	   (dp.x < 0 &&
-			   !can_move_in_tile_map(
-					   state.world.tile_map,
-					   offset_pos(player.pos, {dp.x - PLAYER_WIDTH / 2, 0}),
-				   )) {
-		dp.x = 0
-		player.vel.x *= -PLAYER_COLLIDE_COEF
-	}
-
-	if (dp.y > 0 &&
-		   !can_move_in_tile_map(
-				   state.world.tile_map,
-				   offset_pos(
-					   player.pos,
-					   {0, dp.y + PLAYER_COLLISION_HEIGHT_TILES},
-				   ),
-			   )) ||
-	   (dp.y < 0 &&
-			   !can_move_in_tile_map(
-					   state.world.tile_map,
-					   offset_pos(player.pos, {0, dp.y}),
-				   )) {
-		dp.y = 0
-		player.vel.y *= -PLAYER_COLLIDE_COEF
-	}
-
-	player.pos = normalize_pos(offset_pos(player.pos, dp))
-
-	/* TODO: Finish better collision detection
-	target_new_player_pos := normalize_pos(offset_pos(player.pos, dp))
-
-	best_new_player_pos := player.pos
-	best_dist2 := world_pos_dist2(target_new_player_pos, best_new_player_pos)
-
-	tile_z := player.pos.tile.z
-	for tile_y in 0 ..< i32(1) {
-		for tile_x in 0 ..< i32(1) {
-			tile, tile_exists := tile_map_get_tile_ptr(
-				state.world.tile_map,
-				{tile_x, tile_y, tile_z},
-			)
-			if tile_exists && tile^ != .Wall {
-
+	collides_tile :: proc(
+		pos: World_Pos,
+		dp: [2]f32,
+		tile_pos: [2]i32,
+	) -> (
+		t: f32 = 1.0,
+		norm: [2]f32,
+		collides: bool,
+	) {
+		// TODO: Make some of these exclusive
+		// Up
+		if pos.tile.y < tile_pos.y && dp.y > 0 {
+			wall_t, wall_collides := collides_wall(pos, dp, tile_pos, -0.5, 1)
+			if wall_collides && wall_t < t {
+				t = wall_t
+				collides = wall_collides
+				norm = {0, -1}
 			}
 		}
+		// Down
+		if pos.tile.y > tile_pos.y && dp.y < 0 {
+			wall_t, wall_collides := collides_wall(pos, dp, tile_pos, 0.5, 1)
+			if wall_collides && wall_t < t {
+				t = wall_t
+				collides = wall_collides
+				norm = {0, 1}
+			}
+		}
+		// Left
+		if pos.tile.x > tile_pos.x && dp.x < 0 {
+			wall_t, wall_collides := collides_wall(pos, dp, tile_pos, 0.5, 0)
+			if wall_collides && wall_t < t {
+				t = wall_t
+				collides = wall_collides
+				norm = {1, 0}
+			}
+		}
+		// Right
+		if pos.tile.x < tile_pos.x && dp.x > 0 {
+			wall_t, wall_collides := collides_wall(pos, dp, tile_pos, -0.5, 0)
+			if wall_collides && wall_t < t {
+				t = wall_t
+				collides = wall_collides
+				norm = {-1, 0}
+			}
+		}
+
+		return
 	}
-	*/
+
+	remaining_dt_sec := dt_sec
+
+	// TODO: Limit iterations
+	// TODO: Add epsilon comparison
+	collision_iters := 0
+	for remaining_dt_sec > 0 {
+		target_dp := player.vel * remaining_dt_sec
+		target_pos := normalize_pos(offset_pos(player.pos, target_dp))
+
+		// Search for collisions in the rectangle bounding the current and target
+		// positions
+		min_tile := linalg.min(player.pos.tile.xy, target_pos.tile.xy)
+		max_tile := linalg.max(player.pos.tile.xy, target_pos.tile.xy)
+
+		closest_t: f32 = 1
+		collide_norm: [2]f32
+
+		tile_z := player.pos.tile.z
+		for tile_y in min_tile.y ..= max_tile.y {
+			for tile_x in min_tile.x ..= max_tile.x {
+				tile_xy := [2]i32{tile_x, tile_y}
+
+				// No need to check current position. This should also help
+				// recover from the player being inside a wall tile
+				if player.pos.tile.xy == tile_xy do continue
+
+				// TODO: How to handle missing tiles?
+				tile := tile_map_get_tile_or_default(
+					state.world.tile_map,
+					{tile_x, tile_y, tile_z},
+					.Wall,
+				)
+
+				if tile != .Wall do continue
+
+				if t, norm, coll := collides_tile(
+					player.pos,
+					target_dp,
+					tile_xy,
+				); coll && t < closest_t {
+					closest_t = t
+					collide_norm = norm
+				}
+			}
+		}
+
+		step_dt_sec: f32
+		if closest_t < 1 {
+			T_EPSILON :: 0.0001
+			step_dt_sec = max(remaining_dt_sec * closest_t - T_EPSILON, 0)
+		} else {
+			step_dt_sec = remaining_dt_sec
+		}
+		remaining_dt_sec -= step_dt_sec
+
+		// Update position based on collision, then update velocity. Not fully
+		// "correct", but computing the acceleration continuously makes the
+		// collision path non-linear
+		step_dp := player.vel * step_dt_sec
+		player.pos = normalize_pos(offset_pos(player.pos, step_dp))
+
+		// Friction -> collide -> move_acc
+		if player.vel != 0 {
+			// v' = v - F*v/|v| = v * (1 - F/|v|)
+			friction_scale := min(
+				PLAYER_FRICTION * step_dt_sec / linalg.length(player.vel),
+				1,
+			)
+			player.vel *= 1 - friction_scale
+		}
+		if collide_norm != 0 {
+			player.vel -=
+				(1 + PLAYER_COLLIDE_COEF) *
+				linalg.dot(collide_norm, player.vel) *
+				collide_norm
+		}
+		player.vel += step_dt_sec * player_move_acc
+		player.vel = linalg.clamp_length(player.vel, max_speed)
+
+		MAX_COLLISION_ITERS :: 10
+		collision_iters += 1
+		if collision_iters > MAX_COLLISION_ITERS {
+			panic("possible infinite collision detection loop")
+		}
+	}
 
 	if player.pos.tile != old_tile_pos {
 		#partial switch tile_map_get_tile_or_default(
@@ -573,8 +677,10 @@ PLAYER_FRICTION: f32 : 40 // tile/sec^2
 // Include friction, since it is always acting against movement acceleration
 // TODO: Only apply friction in non-movement direction?
 // TODO: Use drag force instead of constant friction?
-PLAYER_MOVE_ACC: f32 : PLAYER_FRICTION + 30 // tile/sec^2
-PLAYER_COLLIDE_COEF: f32 : 0.5
+PLAYER_MOVE_ACC: f32 : 70 // tile/sec^2
+// TODO: Figure out how to avoid studering when pressing against a wall when
+// this is non-0
+PLAYER_COLLIDE_COEF: f32 : 0
 
 WINDOW_TILES_WIDTH :: 16
 WINDOW_TILES_HEIGHT :: 9
