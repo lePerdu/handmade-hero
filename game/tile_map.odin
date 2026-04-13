@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "core:math"
 import "core:math/linalg"
 import "core:slice"
+import "core:testing"
 
 Global_Chunk_Pos :: [3]i32
 Global_Tile_Pos :: [3]i32
@@ -59,41 +60,52 @@ normalize_pos :: proc(pos: World_Pos) -> World_Pos {
 }
 
 // TODO: Fix test cases
-/*
 @(test)
 test_norm_pos :: proc(t: ^testing.T) {
 	testing.expect_value(t, normalize_pos({}), World_Pos{})
+	// Not changed within single box
 	testing.expect_value(
 		t,
-		normalize_pos({local = {5e-7, 0}}),
-		World_Pos{local = {5e-7, 0}},
+		normalize_pos({local = {0.25, -0.4}}),
+		World_Pos{local = {0.25, -0.4}},
 	)
+	// Wrap at +0.5, not at -0.5
 	testing.expect_value(
 		t,
-		normalize_pos({local = {8, 12 * CHUNK_SIZE + 0.5}}),
-		World_Pos{tile = {0, 12, 0}, local = {8, 0.5}},
+		normalize_pos({local = {-0.5, +0.5}}),
+		World_Pos{tile = {0, 1, 0}, local = {-0.5, -0.5}},
 	)
 
-	// TODO: These currently fail due to rounding errors
-
-	testing.expect_value(
-		t,
-		normalize_pos({local = {-5e-7, 0}}),
-		// TODO: Should this go to `CHUNK_SIZE - epsilon` or just round `local` to 0?
-		World_Pos {
-			tile = {-1, 0, 0},
-			local = {CHUNK_SIZE * (1 - math.F32_EPSILON), 0},
-		},
-	)
+	HALF_MINUS_EPSILON :: (1 - math.F32_EPSILON) / 2
+	HALF_PLUS_EPSILON :: (1 + math.F32_EPSILON) / 2
 
 	testing.expect_value(
 		t,
-		normalize_pos({local = {CHUNK_SIZE * (1 + math.F32_EPSILON), 5}}),
-		// TODO: Should this go to `CHUNK_SIZE - epsilon` or just round `local` to 0?
-		World_Pos{tile = {1, 0}, local = {CHUNK_SIZE * math.F32_EPSILON, 5}},
+		normalize_pos({local = {HALF_MINUS_EPSILON, -HALF_MINUS_EPSILON}}),
+		World_Pos{local = {HALF_MINUS_EPSILON, -HALF_MINUS_EPSILON}},
+	)
+
+	testing.expect_value(
+		t,
+		normalize_pos({local = {HALF_PLUS_EPSILON, -HALF_PLUS_EPSILON}}),
+		World_Pos{tile = {+1, -1, 0}, local = {-0.5, HALF_MINUS_EPSILON}},
+	)
+
+	testing.expect_value(
+		t,
+		normalize_pos({local = {-4.5, 91.54}}),
+		// Not quite -0.5 due to rounding
+		// TODO: Make comparison more reliable?
+		World_Pos{tile = {-4, 92, 0}, local = {-0.5, -0.45999908}},
+	)
+
+	F32_MAX_INT :: 1 << (math.F32_MANT_DIG - 1) - 1
+	testing.expect_value(
+		t,
+		normalize_pos({local = {-F32_MAX_INT - 0.5, F32_MAX_INT}}),
+		World_Pos{tile = {-F32_MAX_INT, F32_MAX_INT, 0}, local = {-0.5, 0}},
 	)
 }
-*/
 
 @(private = "file")
 in_bounds :: proc(

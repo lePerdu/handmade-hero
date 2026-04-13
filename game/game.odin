@@ -1,7 +1,6 @@
 package game
 
 import "base:runtime"
-import "core:container/intrusive/list"
 import "core:fmt"
 import "core:math"
 import "core:math/linalg"
@@ -452,9 +451,6 @@ update_player_movement :: proc(
 	player := &state.entities[entity_index]
 	// Save for later after movement computation
 	old_tile_pos := player.pos.tile
-
-	// player.pos.local = 0
-
 	// TODO: Support analog sticks
 
 	// Sign of the movement: -1, 0, +1
@@ -576,6 +572,7 @@ update_player_movement :: proc(
 		target_dp := player.vel * remaining_dt_sec
 		target_pos := normalize_pos(offset_pos(player.pos, target_dp))
 
+		// TODO: Handle or disallow coordinate wrapping
 		// Search for collisions in the rectangle bounding the current and target
 		// positions
 		min_tile := linalg.min(player.pos.tile.xy, target_pos.tile.xy)
@@ -615,6 +612,7 @@ update_player_movement :: proc(
 
 		step_dt_sec: f32
 		if closest_t < 1 {
+			// TODO: Use distance-based epsilon so it's velocity-independant
 			T_EPSILON :: 0.0001
 			step_dt_sec = max(remaining_dt_sec * closest_t - T_EPSILON, 0)
 		} else {
