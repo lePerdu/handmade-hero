@@ -2,6 +2,7 @@ package game
 
 import "base:runtime"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
@@ -484,99 +485,48 @@ update_player_movement :: proc(
 	if controller.buttons[.Action_Up].end_pressed {
 		max_speed *= 3
 	}
+	if controller.buttons[.Action_Down].end_pressed {
+		max_speed /= 3
+	}
 
 	player_move_acc := PLAYER_MOVE_ACC * linalg.normalize0(player_move_dir)
 
-	collides_wall :: proc(
-		pos: World_Pos,
-		dp: [2]f32,
-		tile_pos: [2]i32,
-		wall_coord: f32,
-		$AXIS: int,
-	) -> (
-		t: f32,
-		collides: bool,
-	) {
-		OTHER_AXIS :: 1 - AXIS
-		rel_pos := linalg.to_f32(tile_pos - pos.tile.xy) - pos.local
-
-		delta := rel_pos[AXIS] + wall_coord
-		// TODO: Remove this check since it's done outside?
-		if math.sign(delta) != math.sign(dp[AXIS]) ||
-		   math.sign(dp[AXIS]) == 0 {
-			return
-		}
-
-		t = delta / dp[AXIS]
-		other_delta := rel_pos[OTHER_AXIS]
-		collides = -0.5 <= other_delta && other_delta <= 0.5
-		return
+	if player.vel != 0 {
+		// v' = v - F*v/|v| = v * (1 - F/|v|)
+		friction_scale := min(
+			PLAYER_FRICTION * dt_sec / linalg.length(player.vel),
+			1,
+		)
+		player.vel *= 1 - friction_scale
 	}
-
-	collides_tile :: proc(
-		pos: World_Pos,
-		dp: [2]f32,
-		tile_pos: [2]i32,
-	) -> (
-		t: f32 = 1.0,
-		norm: [2]f32,
-		collides: bool,
-	) {
-		// TODO: Make some of these exclusive
-		// Up
-		if pos.tile.y < tile_pos.y && dp.y > 0 {
-			wall_t, wall_collides := collides_wall(pos, dp, tile_pos, -0.5, 1)
-			if wall_collides && wall_t < t {
-				t = wall_t
-				collides = wall_collides
-				norm = {0, -1}
-			}
-		}
-		// Down
-		if pos.tile.y > tile_pos.y && dp.y < 0 {
-			wall_t, wall_collides := collides_wall(pos, dp, tile_pos, 0.5, 1)
-			if wall_collides && wall_t < t {
-				t = wall_t
-				collides = wall_collides
-				norm = {0, 1}
-			}
-		}
-		// Left
-		if pos.tile.x > tile_pos.x && dp.x < 0 {
-			wall_t, wall_collides := collides_wall(pos, dp, tile_pos, 0.5, 0)
-			if wall_collides && wall_t < t {
-				t = wall_t
-				collides = wall_collides
-				norm = {1, 0}
-			}
-		}
-		// Right
-		if pos.tile.x < tile_pos.x && dp.x > 0 {
-			wall_t, wall_collides := collides_wall(pos, dp, tile_pos, -0.5, 0)
-			if wall_collides && wall_t < t {
-				t = wall_t
-				collides = wall_collides
-				norm = {-1, 0}
-			}
-		}
-
-		return
-	}
+	player.vel += dt_sec * player_move_acc
+	player.vel = linalg.clamp_length(player.vel, max_speed)
 
 	remaining_dt_sec := dt_sec
 
-	// TODO: Limit iterations
-	// TODO: Add epsilon comparison
 	collision_iters := 0
 	for remaining_dt_sec > 0 {
 		target_dp := player.vel * remaining_dt_sec
-		target_pos := normalize_pos(offset_pos(player.pos, target_dp))
+		target_pos := offset_pos(player.pos, target_dp)
+		if target_pos.tile == {5, 0, 0} {
+			log.infof("passing through wall")
+		}
+
+		// Min/max based on the player's position
+		region_min, region_max := world_pos_min_max(player.pos, target_pos)
+
+		// Min/max tile to search, found by extending the player's position by
+		// the collision box
 
 		// TODO: Handle or disallow coordinate wrapping
 		// Search for collisions in the rectangle bounding the current and target
 		// positions
-		min_tile := linalg.min(player.pos.tile.xy, target_pos.tile.xy)
-		max_tile := linalg.max(player.pos.tile.xy, target_pos.tile.xy)
+		// TODO: Center player pos/bounding box to avoid asymmetric adjustments
+		COLLISION_PADDING: [2]f32 : 0.05
+		min_tile :=
+			offset_pos(region_min, {-PLAYER_COLLISION_SIZE.x / 2, 0} - COLLISION_PADDING).tile.xy
+		max_tile :=
+			offset_pos(region_max, {PLAYER_COLLISION_SIZE.x / 2, PLAYER_COLLISION_SIZE.y} + COLLISION_PADDING).tile.xy
 
 		closest_t: f32 = 1
 		collide_norm: [2]f32
@@ -602,6 +552,7 @@ update_player_movement :: proc(
 				if t, norm, coll := collides_tile(
 					player.pos,
 					target_dp,
+					PLAYER_COLLISION_SIZE,
 					tile_xy,
 				); coll && t < closest_t {
 					closest_t = t
@@ -620,29 +571,13 @@ update_player_movement :: proc(
 		}
 		remaining_dt_sec -= step_dt_sec
 
-		// Update position based on collision, then update velocity. Not fully
-		// "correct", but computing the acceleration continuously makes the
-		// collision path non-linear
 		step_dp := player.vel * step_dt_sec
-		player.pos = normalize_pos(offset_pos(player.pos, step_dp))
-
-		// Friction -> collide -> move_acc
-		if player.vel != 0 {
-			// v' = v - F*v/|v| = v * (1 - F/|v|)
-			friction_scale := min(
-				PLAYER_FRICTION * step_dt_sec / linalg.length(player.vel),
-				1,
-			)
-			player.vel *= 1 - friction_scale
-		}
-		if collide_norm != 0 {
-			player.vel -=
-				(1 + PLAYER_COLLIDE_COEF) *
-				linalg.dot(collide_norm, player.vel) *
-				collide_norm
-		}
-		player.vel += step_dt_sec * player_move_acc
-		player.vel = linalg.clamp_length(player.vel, max_speed)
+		player.pos = offset_pos(player.pos, step_dp)
+		// No-op if collide_norm == 0
+		player.vel -=
+			(1 + PLAYER_COLLIDE_COEF) *
+			linalg.dot(collide_norm, player.vel) *
+			collide_norm
 
 		MAX_COLLISION_ITERS :: 10
 		collision_iters += 1
@@ -664,12 +599,143 @@ update_player_movement :: proc(
 	}
 }
 
+Axis :: enum {
+	X = 0,
+	Y = 1,
+}
+
+collides_axis_aligned_line :: proc(
+	pos: [2]f32,
+	dp: [2]f32,
+	line_base: [2]f32,
+	line_len: f32,
+	$AXIS: Axis,
+) -> (
+	t: f32,
+	collides: bool,
+) {
+	CONST_AXIS :: 1 - int(AXIS)
+	LEN_AXIS :: int(AXIS)
+	// Position of `line_base` relative to `pos`
+	delta := line_base - pos
+	// TODO: Remove this check since it's done outside?
+	if math.sign(delta[CONST_AXIS]) != math.sign(dp[CONST_AXIS]) ||
+	   math.sign(dp[CONST_AXIS]) == 0 {
+		return
+	}
+
+	t = delta[CONST_AXIS] / dp[CONST_AXIS]
+
+	// Position along the segment at the point of collision with the
+	// extended line
+	other_delta := -delta[LEN_AXIS] + t * dp[LEN_AXIS]
+	collides = 0 <= other_delta && other_delta <= line_len
+	return
+}
+
+collides_axis_aligned_rect :: proc(
+	pos: [2]f32,
+	dp: [2]f32,
+	// TODO: Represent with origin instead of corner?
+	rect_bottom_left: [2]f32,
+	rect_size: [2]f32,
+) -> (
+	t: f32 = 1.0,
+	norm: [2]f32,
+	collides: bool,
+) {
+	// bottom
+	if dp.y > 0 {
+		wall_t, wall_collides := collides_axis_aligned_line(
+			pos,
+			dp,
+			rect_bottom_left,
+			rect_size.x,
+			.X,
+		)
+		if wall_collides && wall_t < t {
+			t = wall_t
+			collides = wall_collides
+			norm = {0, -1}
+		}
+	}
+	// top
+	if dp.y < 0 {
+		wall_t, wall_collides := collides_axis_aligned_line(
+			pos,
+			dp,
+			rect_bottom_left + {0, rect_size.y},
+			rect_size.x,
+			.X,
+		)
+		if wall_collides && wall_t < t {
+			t = wall_t
+			collides = wall_collides
+			norm = {0, +1}
+		}
+	}
+	// left
+	if dp.x > 0 {
+		wall_t, wall_collides := collides_axis_aligned_line(
+			pos,
+			dp,
+			rect_bottom_left,
+			rect_size.y,
+			.Y,
+		)
+		if wall_collides && wall_t < t {
+			t = wall_t
+			collides = wall_collides
+			norm = {-1, 0}
+		}
+	}
+	// right
+	if dp.x < 0 {
+		wall_t, wall_collides := collides_axis_aligned_line(
+			pos,
+			dp,
+			rect_bottom_left + {rect_size.x, 0},
+			rect_size.y,
+			.Y,
+		)
+		if wall_collides && wall_t < t {
+			t = wall_t
+			collides = wall_collides
+			norm = {+1, 0}
+		}
+	}
+	return
+}
+
+collides_tile :: proc(
+	pos: World_Pos, // Bottom-center of the collision box
+	dp: [2]f32,
+	// Size of collision box
+	size: [2]f32,
+	tile_pos: [2]i32,
+) -> (
+	t: f32,
+	norm: [2]f32,
+	collides: bool,
+) {
+	TILE_COLLISION_SIZE: [2]f32 : 1
+	rel_tile_origin := linalg.to_f32(tile_pos - pos.tile.xy)
+	rel_tile_bl := rel_tile_origin - TILE_COLLISION_SIZE / 2 - size / 2
+	// TODO: Make pos the center of the collision box to avoid the
+	// asymmetric adjustment?
+	return collides_axis_aligned_rect(
+		pos.local + {0, size.y / 2},
+		dp,
+		rel_tile_bl,
+		TILE_COLLISION_SIZE + size,
+	)
+}
+
+
 TILE_SIZE_PX :: 60
 TILE_OFFSET_PX :: [2]f32{-TILE_SIZE_PX / 2, 0}
 
-PLAYER_WIDTH: f32 : 0.7
-PLAYER_HEIGHT: f32 : 1
-PLAYER_COLLISION_HEIGHT_TILES: f32 : 0.5
+PLAYER_COLLISION_SIZE: [2]f32 : {0.8, 0.5}
 PLAYER_MAX_SPEED: f32 : 6 // tile/sec
 PLAYER_FRICTION: f32 : 40 // tile/sec^2
 // Include friction, since it is always acting against movement acceleration
@@ -899,13 +965,21 @@ handmade_game_render :: proc "contextless" (
 
 		assert(pos_is_normalized(entity.pos))
 
-		render_pos := world_pos_xy(world_pos_sub(entity.pos, window_origin))
+		render_pos := world_pos_sub_xy(entity.pos, window_origin)
 		// Mark entity's tile
 		render_rect_tile(
 			fb,
 			pos = linalg.to_f32(entity.pos.tile.xy - window_origin.tile.xy),
 			size = 1,
 			color = make_color(1.0),
+		)
+
+		// Mark collision box
+		render_rect_tile(
+			fb,
+			pos = render_pos + 0.5 - {PLAYER_COLLISION_SIZE.x / 2, 0},
+			size = PLAYER_COLLISION_SIZE,
+			color = make_color(0.8, 0.8, 0.0),
 		)
 
 		render_pos_px := render_pos * TILE_SIZE_PX
@@ -927,7 +1001,7 @@ handmade_game_render :: proc "contextless" (
 		MARKER_SIZE :: 0.1
 		render_rect_tile(
 			fb,
-			pos = render_pos + 0.5 - {MARKER_SIZE / 2, 0},
+			pos = render_pos + 0.5 - MARKER_SIZE / 2,
 			size = MARKER_SIZE,
 			color = make_color(0.8, 0.0, 0.0),
 		)

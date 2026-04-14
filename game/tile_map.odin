@@ -31,6 +31,10 @@ world_pos_xy :: proc(pos: World_Pos) -> [2]f32 {
 	return linalg.to_f32(pos.tile).xy + pos.local
 }
 
+world_pos_sub_xy :: proc(a, b: World_Pos) -> [2]f32 {
+	return linalg.to_f32(a.tile.xy - b.tile.xy) + a.local - b.local
+}
+
 world_pos_dist2 :: proc(a, b: World_Pos) -> f32 {
 	delta := world_pos_sub(a, b)
 	delta_xy := world_pos_xy(delta)
@@ -39,6 +43,62 @@ world_pos_dist2 :: proc(a, b: World_Pos) -> f32 {
 
 world_pos_dist :: proc(a, b: World_Pos) -> f32 {
 	return math.sqrt(world_pos_dist2(a, b))
+}
+
+// Positions must be normalized
+world_pos_min :: proc(a, b: World_Pos) -> World_Pos {
+	assert(pos_is_normalized(a))
+	assert(pos_is_normalized(b))
+
+	axis_min :: proc(
+		a_tile, b_tile: i32,
+		a_local, b_local: f32,
+	) -> (
+		tile: i32,
+		local: f32,
+	) {
+		if a_tile < b_tile {
+			return a_tile, a_local
+		}
+		if b_tile < a_tile {
+			return b_tile, b_local
+		}
+		return a_tile, min(a_local, b_local)
+	}
+	tile_x, local_x := axis_min(a.tile.x, b.tile.x, a.local.x, b.local.x)
+	tile_y, local_y := axis_min(a.tile.y, b.tile.y, a.local.y, b.local.y)
+	tile_z := min(a.tile.z, b.tile.z)
+	return {tile = {tile_x, tile_y, tile_z}, local = {local_x, local_y}}
+}
+
+// Positions must be normalized
+world_pos_max :: proc(a, b: World_Pos) -> World_Pos {
+	assert(pos_is_normalized(a))
+	assert(pos_is_normalized(b))
+
+	axis_max :: proc(
+		a_tile, b_tile: i32,
+		a_local, b_local: f32,
+	) -> (
+		tile: i32,
+		local: f32,
+	) {
+		if a_tile > b_tile {
+			return a_tile, a_local
+		}
+		if b_tile > a_tile {
+			return b_tile, b_local
+		}
+		return a_tile, max(a_local, b_local)
+	}
+	tile_x, local_x := axis_max(a.tile.x, b.tile.x, a.local.x, b.local.x)
+	tile_y, local_y := axis_max(a.tile.y, b.tile.y, a.local.y, b.local.y)
+	tile_z := max(a.tile.z, b.tile.z)
+	return {tile = {tile_x, tile_y, tile_z}, local = {local_x, local_y}}
+}
+
+world_pos_min_max :: proc(a, b: World_Pos) -> (min, max: World_Pos) {
+	return world_pos_min(a, b), world_pos_max(a, b)
 }
 
 normalize_pos :: proc(pos: World_Pos) -> World_Pos {
@@ -126,10 +186,11 @@ pos_is_normalized :: proc(pos: World_Pos) -> bool {
 	return in_bounds(pos.local, -0.5, 0.5)
 }
 
+// TODO: Add non-normalized version?
 offset_pos :: proc(pos: World_Pos, delta: [2]f32) -> World_Pos {
 	res := pos
 	res.local += delta
-	return res
+	return normalize_pos(res)
 }
 
 Tile :: enum u8 {
