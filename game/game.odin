@@ -31,7 +31,9 @@ State :: struct {
 Entity :: struct {
 	exists: bool,
 	pos: World_Pos,
-	vel: [2]f32,
+	vel: [3]f32,
+	// TODO: Integrate this into `pos`
+	z: f32,
 	face_dir: Direction,
 }
 
@@ -470,6 +472,12 @@ update_player_movement :: proc(
 		player_move_dir.x += 1
 	}
 
+	if api.button_input_pressed(controller.buttons[.Action_Up]) {
+		if player.z == 0 {
+			player.vel.z = PLAYER_JUMP_VEL
+		}
+	}
+
 	// Base face_dir on the input accel rather than total accel so it doens't
 	// flip back and forth when bouncing
 	if player_move_dir == 0 {
@@ -482,31 +490,39 @@ update_player_movement :: proc(
 	}
 
 	max_speed := PLAYER_MAX_SPEED
-	if controller.buttons[.Action_Up].end_pressed {
+	if controller.buttons[.Action_Right].end_pressed {
 		max_speed *= 3
 	}
-	if controller.buttons[.Action_Down].end_pressed {
+	if controller.buttons[.Action_Left].end_pressed {
 		max_speed /= 3
 	}
 
 	player_move_acc := PLAYER_MOVE_ACC * linalg.normalize0(player_move_dir)
 
-	if player.vel != 0 {
+	if player.vel.xy != 0 {
 		// v' = v - F*v/|v| = v * (1 - F/|v|)
 		friction_scale := min(
-			PLAYER_FRICTION * dt_sec / linalg.length(player.vel),
+			PLAYER_FRICTION * dt_sec / linalg.length(player.vel.xy),
 			1,
 		)
-		player.vel *= 1 - friction_scale
+		player.vel.xy *= 1 - friction_scale
 	}
-	player.vel += dt_sec * player_move_acc
-	player.vel = linalg.clamp_length(player.vel, max_speed)
+	player.vel.xy += dt_sec * player_move_acc
+	player.vel.xy = linalg.clamp_length(player.vel.xy, max_speed)
+
+	if player.z > 0 {
+		player.vel.z -= GRAVITY_ACC * dt_sec
+	} else if player.vel.z < 0 {
+		// Not really necessary, but reset this for consistency
+		player.vel.z = 0
+	}
+	player.z = max(player.z + player.vel.z * dt_sec, 0)
 
 	remaining_dt_sec := dt_sec
 
 	collision_iters := 0
 	for remaining_dt_sec > 0 {
-		target_dp := player.vel * remaining_dt_sec
+		target_dp := player.vel.xy * remaining_dt_sec
 		target_pos := offset_pos(player.pos, target_dp)
 		if target_pos.tile == {5, 0, 0} {
 			log.infof("passing through wall")
@@ -571,12 +587,12 @@ update_player_movement :: proc(
 		}
 		remaining_dt_sec -= step_dt_sec
 
-		step_dp := player.vel * step_dt_sec
+		step_dp := player.vel.xy * step_dt_sec
 		player.pos = offset_pos(player.pos, step_dp)
 		// No-op if collide_norm == 0
-		player.vel -=
+		player.vel.xy -=
 			(1 + PLAYER_COLLIDE_COEF) *
-			linalg.dot(collide_norm, player.vel) *
+			linalg.dot(collide_norm, player.vel.xy) *
 			collide_norm
 
 		MAX_COLLISION_ITERS :: 10
@@ -734,6 +750,7 @@ collides_tile :: proc(
 
 TILE_SIZE_PX :: 60
 TILE_OFFSET_PX :: [2]f32{-TILE_SIZE_PX / 2, 0}
+Z_TO_Y_RATIO :: 0.75
 
 PLAYER_COLLISION_SIZE: [2]f32 : {0.8, 0.5}
 PLAYER_MAX_SPEED: f32 : 6 // tile/sec
@@ -745,6 +762,8 @@ PLAYER_MOVE_ACC: f32 : 70 // tile/sec^2
 // TODO: Figure out how to avoid studering when pressing against a wall when
 // this is non-0
 PLAYER_COLLIDE_COEF: f32 : 0
+PLAYER_JUMP_VEL :: 4
+GRAVITY_ACC: f32 : 10
 
 WINDOW_TILES_WIDTH :: 16
 WINDOW_TILES_HEIGHT :: 9
@@ -982,20 +1001,27 @@ handmade_game_render :: proc "contextless" (
 			color = make_color(0.8, 0.8, 0.0),
 		)
 
-		render_pos_px := render_pos * TILE_SIZE_PX
+		base_render_pos_px := render_pos * TILE_SIZE_PX
+
+		// Fade shadow when the player jumps
+		shadow_alpha := 1 - min(entity.z / 2.0, 1)
+
 		// TODO: Calc render width/height based on image size? Scale bitmaps to fit
 		// pre-defined dimensionts?
 		render_bmp(
 			fb,
-			render_pos_px,
+			base_render_pos_px,
 			// TODO: Is this the proper aling position for the shadow in all
 			// directions?
 			hero_tex.align_px,
 			state.hero_shadow_texture,
+			shadow_alpha,
 		)
-		render_bmp(fb, render_pos_px, hero_tex.align_px, hero_tex.torso)
-		render_bmp(fb, render_pos_px, hero_tex.align_px, hero_tex.cape)
-		render_bmp(fb, render_pos_px, hero_tex.align_px, hero_tex.head)
+		body_render_pos_px := base_render_pos_px
+		body_render_pos_px.y += TILE_SIZE_PX * Z_TO_Y_RATIO * entity.z
+		render_bmp(fb, body_render_pos_px, hero_tex.align_px, hero_tex.torso)
+		render_bmp(fb, body_render_pos_px, hero_tex.align_px, hero_tex.cape)
+		render_bmp(fb, body_render_pos_px, hero_tex.align_px, hero_tex.head)
 
 		// Mark entity's position
 		MARKER_SIZE :: 0.1
@@ -1190,6 +1216,7 @@ render_bmp :: proc(
 	pos: [2]f32,
 	align: [2]i32,
 	img: Bmp_Image,
+	extra_alpha: f32 = 1.0,
 ) {
 	pos := pos - linalg.to_f32(align)
 	region := map_px_region(
@@ -1222,7 +1249,7 @@ render_bmp :: proc(
 			// TODO: Report bug? Or is this just expected in debug mode?
 			// alpha_blend_u8_into(px, src_color)
 			{
-				alpha := u32(src_color.a)
+				alpha := u32(extra_alpha * f32(src_color.a))
 				// TODO: Extracting these adds ~4ms per frame
 				// src_alpha := 1 + alpha
 				// dst_alpha := 256 - alpha
