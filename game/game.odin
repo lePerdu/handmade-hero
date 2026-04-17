@@ -1,5 +1,6 @@
 package game
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:log"
@@ -53,6 +54,55 @@ Direction :: enum {
 	Back,
 	Left,
 	Front,
+}
+
+Rect :: struct($T: typeid) where intrinsics.type_is_numeric(T) {
+	min: [2]T,
+	dim: [2]T,
+}
+
+make_rect_min_dim :: proc(min, dim: [2]$T) -> Rect(T) {
+	assert(dim.x >= 0 && dim.y >= 0)
+	return {min = min, dim = dim}
+}
+
+make_rect_min_max :: proc(min, max: [2]$T) -> Rect(T) {
+	assert(max > min)
+	return {min = min, dim = max - min}
+}
+
+// TODO: This seems dangerous for integer types...
+make_rect_center_dim :: proc(center, dim: [2]$T) -> Rect(T) {
+	assert(dim.x >= 0 && dim.y >= 0)
+	return {min = center - dim / 2, dim = dim}
+}
+
+rect_min :: proc(r: Rect($T)) -> [2]T {
+	return r.min
+}
+
+rect_max :: proc(r: Rect($T)) -> [2]T {
+	return r.min + r.dim
+}
+
+rect_min_max :: proc(r: Rect($T)) -> (min, max: [2]T) {
+	return rect_min(r), rect_max(r)
+}
+
+rect_dim :: proc(r: Rect($T)) -> [2]T {
+	return r.dim
+}
+
+rect_center :: proc(r: Rect($T)) -> [2]T {
+	return r.min + r.dim / 2
+}
+
+rect_scale :: proc(r: Rect($T), scalar: T) -> Rect(T) {
+	return {min = r.min * scalar, dim = r.dim * scalar}
+}
+
+rect_offset :: proc(r: Rect($T), offset: [2]T) -> Rect(T) {
+	return {min = r.min + offset, dim = r.dim}
 }
 
 // Include full/left/right keyboard virtual controllers
@@ -478,7 +528,7 @@ update_player_movement :: proc(
 		}
 	}
 
-	// Base face_dir on the input accel rather than total accel so it doens't
+	// Base face_dir on the input accel rather than total accel so it doesn't + r.dim / 2
 	// flip back and forth when bouncing
 	if player_move_dir == 0 {
 		// Leave face_dir as-is
@@ -579,7 +629,7 @@ update_player_movement :: proc(
 
 		step_dt_sec: f32
 		if closest_t < 1 {
-			// TODO: Use distance-based epsilon so it's velocity-independant
+			// TODO: Use distance-based epsilon so it's velocity-independent
 			T_EPSILON :: 0.0001
 			step_dt_sec = max(remaining_dt_sec * closest_t - T_EPSILON, 0)
 		} else {
@@ -652,14 +702,14 @@ collides_axis_aligned_line :: proc(
 collides_axis_aligned_rect :: proc(
 	pos: [2]f32,
 	dp: [2]f32,
-	// TODO: Represent with origin instead of corner?
-	rect_bottom_left: [2]f32,
-	rect_size: [2]f32,
+	rect: Rect(f32),
 ) -> (
 	t: f32 = 1.0,
 	norm: [2]f32,
 	collides: bool,
 ) {
+	rect_bottom_left := rect_min(rect)
+	rect_size := rect_dim(rect)
 	// bottom
 	if dp.y > 0 {
 		wall_t, wall_collides := collides_axis_aligned_line(
@@ -742,8 +792,7 @@ collides_tile :: proc(
 	return collides_axis_aligned_rect(
 		pos.local + {0, size.y / 2},
 		dp,
-		rel_tile_bl,
-		TILE_COLLISION_SIZE + size,
+		make_rect_center_dim(rel_tile_origin, TILE_COLLISION_SIZE + size),
 	)
 }
 
@@ -759,7 +808,7 @@ PLAYER_FRICTION: f32 : 40 // tile/sec^2
 // TODO: Only apply friction in non-movement direction?
 // TODO: Use drag force instead of constant friction?
 PLAYER_MOVE_ACC: f32 : 70 // tile/sec^2
-// TODO: Figure out how to avoid studering when pressing against a wall when
+// TODO: Figure out how to avoid stuttering when pressing against a wall when
 // this is non-0
 PLAYER_COLLIDE_COEF: f32 : 0
 PLAYER_JUMP_VEL :: 4
@@ -837,7 +886,7 @@ Bmp_Format :: enum {
 	Rgba8le,
 	Argb8le,
 	// TODO: Separate formats for non-alpha channel? Just assume alpha is 255 in
-	// those caes?
+	// those cases?
 }
 
 Bmp_Pixel_Rgba8le :: struct #packed {
@@ -970,8 +1019,10 @@ handmade_game_render :: proc "contextless" (
 
 			render_rect_tile(
 				fb,
-				pos = (linalg.to_f32(window_pos.xy) - state.camera_pos.local),
-				size = 1,
+				make_rect_min_dim(
+					(linalg.to_f32(window_pos.xy) - state.camera_pos.local),
+					1,
+				),
 				color = color,
 			)
 		}
@@ -988,16 +1039,20 @@ handmade_game_render :: proc "contextless" (
 		// Mark entity's tile
 		render_rect_tile(
 			fb,
-			pos = linalg.to_f32(entity.pos.tile.xy - window_origin.tile.xy),
-			size = 1,
+			make_rect_min_dim(
+				linalg.to_f32(entity.pos.tile.xy - window_origin.tile.xy),
+				1,
+			),
 			color = make_color(1.0),
 		)
 
 		// Mark collision box
 		render_rect_tile(
 			fb,
-			pos = render_pos + 0.5 - {PLAYER_COLLISION_SIZE.x / 2, 0},
-			size = PLAYER_COLLISION_SIZE,
+			make_rect_min_dim(
+				min = render_pos + 0.5 - {PLAYER_COLLISION_SIZE.x / 2, 0},
+				dim = PLAYER_COLLISION_SIZE,
+			),
 			color = make_color(0.8, 0.8, 0.0),
 		)
 
@@ -1007,11 +1062,11 @@ handmade_game_render :: proc "contextless" (
 		shadow_alpha := 1 - min(entity.z / 2.0, 1)
 
 		// TODO: Calc render width/height based on image size? Scale bitmaps to fit
-		// pre-defined dimensionts?
+		// pre-defined dimensions?
 		render_bmp(
 			fb,
 			base_render_pos_px,
-			// TODO: Is this the proper aling position for the shadow in all
+			// TODO: Is this the proper align position for the shadow in all
 			// directions?
 			hero_tex.align_px,
 			state.hero_shadow_texture,
@@ -1027,8 +1082,7 @@ handmade_game_render :: proc "contextless" (
 		MARKER_SIZE :: 0.1
 		render_rect_tile(
 			fb,
-			pos = render_pos + 0.5 - MARKER_SIZE / 2,
-			size = MARKER_SIZE,
+			make_rect_center_dim(render_pos + 0.5, MARKER_SIZE),
 			color = make_color(0.8, 0.0, 0.0),
 		)
 	}
@@ -1190,9 +1244,9 @@ round_px_region :: proc(pos, size: [2]f32) -> (pos_px, size_px: [2]int) {
 	return min_px, max_px - min_px
 }
 
-render_rect :: proc(fb: Frame_Buffer, pos, size: [2]f32, color: Color) {
+render_rect :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
 	pixel := make_pixel(color)
-	pos_px, size_px := round_px_region(pos, size)
+	pos_px, size_px := round_px_region(rect_min(rect), rect_dim(rect))
 	region := map_px_region(fb, pos_px, size_px)
 
 	for y in 0 ..< region.size.y {
@@ -1202,11 +1256,10 @@ render_rect :: proc(fb: Frame_Buffer, pos, size: [2]f32, color: Color) {
 	}
 }
 
-render_rect_tile :: proc(fb: Frame_Buffer, pos, size: [2]f32, color: Color) {
+render_rect_tile :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
 	render_rect(
 		fb,
-		pos = pos * TILE_SIZE_PX + TILE_OFFSET_PX,
-		size = size * TILE_SIZE_PX,
+		rect_offset(rect_scale(rect, TILE_SIZE_PX), TILE_OFFSET_PX),
 		color = color,
 	)
 }
@@ -1273,7 +1326,7 @@ alpha_blend :: proc(dst, src: Color) -> Color {
 
 alpha_blend_u8 :: proc(dst, src: Color_U8) -> Color_U8 {
 	alpha := u32(src.a)
-	// TODO: Using vector opertions is much slower in debug mode. Report bug?
+	// TODO: Using vector operations is much slower in debug mode. Report bug?
 	r := (u32(dst.r) * (256 - alpha) + u32(src.r) * (1 + alpha))
 	g := (u32(dst.g) * (256 - alpha) + u32(src.g) * (1 + alpha))
 	b := (u32(dst.b) * (256 - alpha) + u32(src.b) * (1 + alpha))
