@@ -2,6 +2,7 @@ package game
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:encoding/ini"
 import "core:fmt"
 import "core:log"
 import "core:math"
@@ -20,22 +21,40 @@ State :: struct {
 	world: World,
 	camera_pos: World_Pos,
 	camera_follow_entity_index: int,
-	entity_buf: [256]Entity,
-	entities: [dynamic]Entity,
 	controller_to_player_entity: [VIRT_CONTROLLER_COUNT]int,
 	world_arena: mem.Arena,
 	background_texture: Bmp_Image,
 	hero_textures: [Direction]Player_Textures,
 	hero_shadow_texture: Bmp_Image,
+	entities: [MAX_ENTITY_COUNT]Entity,
+	entity_count: int,
+}
+
+MAX_ENTITY_COUNT :: 256
+
+Entity_Type :: enum {
+	None = 0,
+	Hero,
+	Wall,
+}
+
+entity_can_collide :: proc(t: Entity_Type) -> bool {
+	#partial switch t {
+	case .Hero, .Wall:
+		return true
+	case:
+		return false
+	}
 }
 
 Entity :: struct {
-	exists: bool,
+	type: Entity_Type,
 	pos: World_Pos,
 	vel: [3]f32,
 	// TODO: Integrate this into `pos`
 	z: f32,
 	face_dir: Direction,
+	dim: [2]f32,
 }
 
 World :: struct {
@@ -105,6 +124,14 @@ rect_offset :: proc(r: Rect($T), offset: [2]T) -> Rect(T) {
 	return {min = r.min + offset, dim = r.dim}
 }
 
+rect_contains :: proc(r: Rect($T), pos: [2]T) -> bool {
+	min, max := rect_min_max(r)
+	return(
+		(min.x <= pos.x && pos.x < max.x) &&
+		(min.y <= pos.y && pos.y < max.y) \
+	)
+}
+
 // Include full/left/right keyboard virtual controllers
 KEYBOARD_FULL_INDEX :: len(api.Input{}.controllers)
 KEYBOARD_LEFT_INDEX :: KEYBOARD_FULL_INDEX + 1
@@ -147,26 +174,27 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	if !state.initialized {
 		state^ = {}
 		mem.arena_init(&state.world_arena, memory.persistent[size_of(State):])
-		gen_world(state)
 		state.camera_pos = {
 			tile = {VIEW_TILES_WIDTH / 2, VIEW_TILES_HEIGHT / 2, 0},
 			local = 0,
 		}
-		state.entities = mem.buffer_from_slice(state.entity_buf[:])
-		// TODO: Set exists = true in add_entity?
+
+		// TODO: Why is this necessary?
+		state.entity_count = 0
 		nil_entity, nil_entity_index :=
 			add_entity(state) or_else panic("failed to create nil entity")
 		assert(nil_entity_index == 0)
-		assert(!nil_entity.exists)
+		assert(nil_entity.type == .None)
 
 		if player_entity, index, ok := add_entity(state); ok {
 			player_entity^ = {
-				exists = true,
+				type = .Hero,
 				face_dir = .Front,
 				pos = {
 					tile = {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
 					local = {-0.5, -0.5},
 				},
+				dim = PLAYER_COLLISION_SIZE,
 			}
 			state.controller_to_player_entity[KEYBOARD_FULL_INDEX] = index
 			state.camera_follow_entity_index = index
@@ -188,6 +216,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 			"assets/early_data/test/test_hero_shadow.bmp",
 		)
 
+		gen_world(state)
 		state.initialized = true
 	}
 	return state
@@ -220,6 +249,7 @@ load_hero_textures :: proc(
 gen_world :: proc(state: ^State) {
 	SCREENS_X :: 128
 	SCREENS_Y :: 128
+	SCREEN_COUNT :: 2
 
 	mem.arena_free_all(&state.world_arena)
 	context.allocator = mem.arena_allocator(&state.world_arena)
@@ -240,10 +270,10 @@ gen_world :: proc(state: ^State) {
 	rand.reset(2)
 	screen_x, screen_y, screen_z: i32
 	door_left, door_right, door_bottom, door_top, stair, stair_exit: bool
-	for screen_i in 0 ..< 100 {
+	for screen_i in 0 ..< SCREEN_COUNT {
 		// TODO: Custom RNG
 		// Can't add a stair if there is already a stair exit here
-		r := rand.uint_max(stair_exit ? 2 : 3)
+		r := rand.uint_max(stair_exit ? 2 : 2)
 		switch r {
 		case 0:
 			door_right = true
@@ -302,6 +332,19 @@ gen_world :: proc(state: ^State) {
 					}
 				} else {
 					tile^ = .Empty
+				}
+
+				// TODO: Just add wall entities instead of doing both?
+				if tile^ == .Wall {
+					entity, _ :=
+						add_entity(state) or_else panic(
+							"failed to create wall entity",
+						)
+					entity^ = {
+						type = .Wall,
+						pos = {tile = pos, local = {}},
+						dim = 1,
+					}
 				}
 			}
 		}
@@ -444,18 +487,21 @@ handmade_game_update :: proc "contextless" (
 }
 
 add_entity :: proc(state: ^State) -> (entity: ^Entity, index: int, ok: bool) {
-	index = len(state.entities)
-	if _, err := append_nothing(&state.entities); err != nil {
-		return
-	}
-	entity = &state.entities[index]
+	if state.entity_count >= MAX_ENTITY_COUNT do return
+
 	ok = true
+	index = state.entity_count
+	state.entity_count += 1
+
+	entity = &state.entities[index]
+	// Clear out for good measure
+	entity^ = {}
 	return
 }
 
 get_entity :: proc(state: ^State, index: int) -> (entity: ^Entity, ok: bool) {
 	entity = slice.get_ptr(state.entities[:], index) or_return
-	if !entity.exists do return nil, false
+	if entity.type == .None do return nil, false
 	return entity, true
 }
 
@@ -596,7 +642,9 @@ update_player_movement :: proc(
 
 		closest_t: f32 = 1
 		collide_norm: [2]f32
+		collide_entity: ^Entity
 
+		/*
 		tile_z := player.pos.tile.z
 		for tile_y in min_tile.y ..= max_tile.y {
 			for tile_x in min_tile.x ..= max_tile.x {
@@ -624,6 +672,39 @@ update_player_movement :: proc(
 					closest_t = t
 					collide_norm = norm
 				}
+			}
+		}
+		*/
+
+		// TODO: Make pos the center of the collision box to avoid the
+		// asymmetric adjustment? Support more general collision boxes?
+		player_coll_pos := player.pos.local + {0, player.dim.y / 2}
+
+		for &entity, index in state.entities[:state.entity_count] {
+			if !entity_can_collide(entity.type) do continue
+			if index == entity_index do continue
+			if entity.pos.tile.z != player.pos.tile.z do continue
+
+			// TODO: Include local position here as well and don't pass local
+			// position to collision routines? Add collision routines that take
+			// collision boxes directly?
+			rel_target_origin := linalg.to_f32(
+				entity.pos.tile.xy - player.pos.tile.xy,
+			)
+			coll_rect := make_rect_center_dim(
+				rel_target_origin,
+				entity.dim + player.dim,
+			)
+
+			if t, norm, coll := collides_axis_aligned_rect(
+				player_coll_pos,
+				target_dp,
+				coll_rect,
+			); coll && t < closest_t {
+				closest_t = t
+				collide_norm = norm
+				// TODO: Track index instead?
+				collide_entity = &entity
 			}
 		}
 
@@ -985,6 +1066,7 @@ handmade_game_render :: proc "contextless" (
 		local = state.camera_pos.local,
 	}
 
+	/*
 	// Can reduce the tiles drawn when the camera is tile-aligned
 	overdraw_x: i32 = window_origin.local.x == 0.0 ? 0 : 1
 	overdraw_y: i32 = window_origin.local.y == 0.0 ? 0 : 1
@@ -1027,64 +1109,98 @@ handmade_game_render :: proc "contextless" (
 			)
 		}
 	}
+*/
 
-	for entity in state.entities {
-		if !entity.exists do continue
-		if entity.pos.tile.z != state.camera_pos.tile.z do continue
-		hero_tex := state.hero_textures[entity.face_dir]
+	// Render in reverse order so that the player is on top
+	// TODO: Do actual render ordering
+	for entity_index := state.entity_count - 1;
+	    entity_index >= 0;
+	    entity_index -= 1 {
+		entity := &state.entities[entity_index]
+		switch entity.type {
+		case .None:
+		case .Wall:
+			assert(pos_is_normalized(entity.pos))
+			// TODO: Include 0.5 offset in render_rect_tile?
+			render_pos := world_pos_sub_xy(entity.pos, window_origin) + 0.5
+			// Mark entity's tile
+			render_rect_tile(
+				fb,
+				make_rect_center_dim(render_pos, entity.dim),
+				color = make_color(0.8),
+			)
+		case .Hero:
+			// if entity.pos.tile.z != state.camera_pos.tile.z do continue
+			hero_tex := state.hero_textures[entity.face_dir]
 
-		assert(pos_is_normalized(entity.pos))
+			assert(pos_is_normalized(entity.pos))
 
-		render_pos := world_pos_sub_xy(entity.pos, window_origin)
-		// Mark entity's tile
-		render_rect_tile(
-			fb,
-			make_rect_min_dim(
-				linalg.to_f32(entity.pos.tile.xy - window_origin.tile.xy),
-				1,
-			),
-			color = make_color(1.0),
-		)
+			render_pos := world_pos_sub_xy(entity.pos, window_origin)
+			// Mark entity's tile
+			render_rect_tile(
+				fb,
+				make_rect_min_dim(
+					linalg.to_f32(entity.pos.tile.xy - window_origin.tile.xy),
+					1,
+				),
+				color = make_color(1.0),
+			)
 
-		// Mark collision box
-		render_rect_tile(
-			fb,
-			make_rect_min_dim(
-				min = render_pos + 0.5 - {PLAYER_COLLISION_SIZE.x / 2, 0},
-				dim = PLAYER_COLLISION_SIZE,
-			),
-			color = make_color(0.8, 0.8, 0.0),
-		)
+			// Mark collision box
+			render_rect_tile(
+				fb,
+				make_rect_min_dim(
+					min = render_pos + 0.5 - {entity.dim.x / 2, 0},
+					dim = entity.dim,
+				),
+				color = make_color(0.8, 0.8, 0.0),
+			)
 
-		base_render_pos_px := render_pos * TILE_SIZE_PX
+			base_render_pos_px := render_pos * TILE_SIZE_PX
 
-		// Fade shadow when the player jumps
-		shadow_alpha := 1 - min(entity.z / 2.0, 1)
+			// Fade shadow when the player jumps
+			shadow_alpha := 1 - min(entity.z / 2.0, 1)
 
-		// TODO: Calc render width/height based on image size? Scale bitmaps to fit
-		// pre-defined dimensions?
-		render_bmp(
-			fb,
-			base_render_pos_px,
-			// TODO: Is this the proper align position for the shadow in all
-			// directions?
-			hero_tex.align_px,
-			state.hero_shadow_texture,
-			shadow_alpha,
-		)
-		body_render_pos_px := base_render_pos_px
-		body_render_pos_px.y += TILE_SIZE_PX * Z_TO_Y_RATIO * entity.z
-		render_bmp(fb, body_render_pos_px, hero_tex.align_px, hero_tex.torso)
-		render_bmp(fb, body_render_pos_px, hero_tex.align_px, hero_tex.cape)
-		render_bmp(fb, body_render_pos_px, hero_tex.align_px, hero_tex.head)
+			// TODO: Calc render width/height based on image size? Scale bitmaps to fit
+			// pre-defined dimensions?
+			render_bmp(
+				fb,
+				base_render_pos_px,
+				// TODO: Is this the proper align position for the shadow in all
+				// directions?
+				hero_tex.align_px,
+				state.hero_shadow_texture,
+				shadow_alpha,
+			)
+			body_render_pos_px := base_render_pos_px
+			body_render_pos_px.y += TILE_SIZE_PX * Z_TO_Y_RATIO * entity.z
+			render_bmp(
+				fb,
+				body_render_pos_px,
+				hero_tex.align_px,
+				hero_tex.torso,
+			)
+			render_bmp(
+				fb,
+				body_render_pos_px,
+				hero_tex.align_px,
+				hero_tex.cape,
+			)
+			render_bmp(
+				fb,
+				body_render_pos_px,
+				hero_tex.align_px,
+				hero_tex.head,
+			)
 
-		// Mark entity's position
-		MARKER_SIZE :: 0.1
-		render_rect_tile(
-			fb,
-			make_rect_center_dim(render_pos + 0.5, MARKER_SIZE),
-			color = make_color(0.8, 0.0, 0.0),
-		)
+			// Mark entity's position
+			MARKER_SIZE :: 0.1
+			render_rect_tile(
+				fb,
+				make_rect_center_dim(render_pos + 0.5, MARKER_SIZE),
+				color = make_color(0.8, 0.0, 0.0),
+			)
+		}
 	}
 }
 
