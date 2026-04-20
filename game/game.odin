@@ -242,7 +242,10 @@ load_hero_textures :: proc(
 		head = head,
 		cape = cape,
 		torso = torso,
-		align_px = {i32(torso.width) / 2, 0},
+		align_px = {
+			i32(torso.width) / 2,
+			i32(PLAYER_COLLISION_SIZE.y * TILE_SIZE_PX / 2),
+		},
 	}
 }
 
@@ -514,28 +517,6 @@ handle_controller_input :: proc(
 	entity_index := state.controller_to_player_entity[controller_index]
 	if entity_index == 0 {
 		return
-		/*
-		if api.button_input_pressed(controller.buttons[.Start]) {
-			new_player: ^Entity
-			new_player, entity_index =
-				add_entity(state) or_else panic(
-					"failed to add player entity for controller",
-				)
-			new_player^ = {
-				exists = true,
-				face_dir = .Front,
-				pos = {
-					tile = {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
-				},
-			}
-			state.controller_to_player_entity[controller_index] = entity_index
-			if state.camera_follow_entity_index == 0 {
-				state.camera_follow_entity_index = entity_index
-			}
-		} else {
-			return
-		}
-		*/
 	}
 
 	update_player_movement(state, entity_index, dt_sec, controller)
@@ -644,42 +625,6 @@ update_player_movement :: proc(
 		collide_norm: [2]f32
 		collide_entity: ^Entity
 
-		/*
-		tile_z := player.pos.tile.z
-		for tile_y in min_tile.y ..= max_tile.y {
-			for tile_x in min_tile.x ..= max_tile.x {
-				tile_xy := [2]i32{tile_x, tile_y}
-
-				// No need to check current position. This should also help
-				// recover from the player being inside a wall tile
-				if player.pos.tile.xy == tile_xy do continue
-
-				// TODO: How to handle missing tiles?
-				tile := tile_map_get_tile_or_default(
-					state.world.tile_map,
-					{tile_x, tile_y, tile_z},
-					.Wall,
-				)
-
-				if tile != .Wall do continue
-
-				if t, norm, coll := collides_tile(
-					player.pos,
-					target_dp,
-					PLAYER_COLLISION_SIZE,
-					tile_xy,
-				); coll && t < closest_t {
-					closest_t = t
-					collide_norm = norm
-				}
-			}
-		}
-		*/
-
-		// TODO: Make pos the center of the collision box to avoid the
-		// asymmetric adjustment? Support more general collision boxes?
-		player_coll_pos := player.pos.local + {0, player.dim.y / 2}
-
 		for &entity, index in state.entities[:state.entity_count] {
 			if !entity_can_collide(entity.type) do continue
 			if index == entity_index do continue
@@ -697,7 +642,7 @@ update_player_movement :: proc(
 			)
 
 			if t, norm, coll := collides_axis_aligned_rect(
-				player_coll_pos,
+				player.pos.local,
 				target_dp,
 				coll_rect,
 			); coll && t < closest_t {
@@ -1066,57 +1011,9 @@ handmade_game_render :: proc "contextless" (
 		local = state.camera_pos.local,
 	}
 
-	/*
-	// Can reduce the tiles drawn when the camera is tile-aligned
-	overdraw_x: i32 = window_origin.local.x == 0.0 ? 0 : 1
-	overdraw_y: i32 = window_origin.local.y == 0.0 ? 0 : 1
-	for window_row in -overdraw_y ..< i32(VIEW_TILES_HEIGHT) + overdraw_y {
-		col_loop: for window_col in -overdraw_x ..< i32(VIEW_TILES_WIDTH) +
-			overdraw_x {
-			window_pos := Global_Tile_Pos{window_col, window_row, 0}
-			tile_pos := window_pos + window_origin.tile
-			tile_val, ok := tile_map_get_tile_ptr(
-				state.world.tile_map,
-				tile_pos,
-			)
-			if !ok {
-				// Leave the tile blank for now? Wrap the coordinate?
-				continue
-			}
-
-			color: Color
-			switch tile_val^ {
-			case .Empty:
-				continue col_loop
-			case .Wall:
-				color = make_color(0.8)
-			case .Door:
-				// door
-				color = make_color(0.2)
-			case .Stair_Up:
-				color = make_color(r = 0.0, g = 0.4, b = 0.0)
-			case .Stair_Down:
-				color = make_color(r = 0.0, g = 0.0, b = 0.4)
-			}
-
-			render_rect_tile(
-				fb,
-				make_rect_min_dim(
-					(linalg.to_f32(window_pos.xy) - state.camera_pos.local),
-					1,
-				),
-				color = color,
-			)
-		}
-	}
-*/
-
 	// Render in reverse order so that the player is on top
 	// TODO: Do actual render ordering
-	for entity_index := state.entity_count - 1;
-	    entity_index >= 0;
-	    entity_index -= 1 {
-		entity := &state.entities[entity_index]
+	#reverse for entity in state.entities[:state.entity_count] {
 		switch entity.type {
 		case .None:
 		case .Wall:
@@ -1149,10 +1046,7 @@ handmade_game_render :: proc "contextless" (
 			// Mark collision box
 			render_rect_tile(
 				fb,
-				make_rect_min_dim(
-					min = render_pos + 0.5 - {entity.dim.x / 2, 0},
-					dim = entity.dim,
-				),
+				make_rect_center_dim(render_pos + 0.5, entity.dim),
 				color = make_color(0.8, 0.8, 0.0),
 			)
 
