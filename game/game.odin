@@ -2,7 +2,6 @@ package game
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:encoding/ini"
 import "core:fmt"
 import "core:log"
 import "core:math"
@@ -257,18 +256,7 @@ gen_world :: proc(state: ^State) {
 	mem.arena_free_all(&state.world_arena)
 	context.allocator = mem.arena_allocator(&state.world_arena)
 
-	map_size := [?]i32 {
-		SCREENS_X * VIEW_TILES_WIDTH / CHUNK_SIZE,
-		SCREENS_Y * VIEW_TILES_HEIGHT / CHUNK_SIZE,
-		2,
-	}
-	state.world.tile_map = {
-		size = map_size,
-		chunks = make(
-			[^]Tile_Chunk,
-			int(map_size.x * map_size.y * map_size.z),
-		),
-	}
+	state.world.tile_map = {}
 
 	rand.reset(2)
 	screen_x, screen_y, screen_z: i32
@@ -296,7 +284,7 @@ gen_world :: proc(state: ^State) {
 					screen_z,
 				}
 				tile, ok := tile_map_get_tile_or_alloc_chunk(
-					state.world.tile_map,
+					&state.world.tile_map,
 					pos,
 				)
 				assert(ok)
@@ -680,7 +668,7 @@ update_player_movement :: proc(
 
 	if player.pos.tile != old_tile_pos {
 		#partial switch tile_map_get_tile_or_default(
-			state.world.tile_map,
+			&state.world.tile_map,
 			player.pos.tile,
 		) {
 		case .Stair_Up:

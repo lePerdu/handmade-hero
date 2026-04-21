@@ -201,26 +201,42 @@ Tile :: enum u8 {
 	Stair_Down,
 }
 
-// TODO: Does tile map size ever need to be dynamic?
+Tile_Hash :: distinct u32
+
+CHUNK_SIZE_BITS :: 4
+CHUNK_SIZE :: 1 << CHUNK_SIZE_BITS
+CHUNK_SIZE_MASK :: CHUNK_SIZE - 1
+
 Tile_Chunk :: struct {
-	// TODO: Store custom stride to allow taking subset views?
+	// TODO: Figure out where/how to ban wrapping
+	pos: [3]i32,
+	hash: Tile_Hash,
+
 	// Tiles, stored in row-major order
 	tiles: ^[CHUNK_SIZE][CHUNK_SIZE]Tile,
+}
+
+// Invalid pointer used to mark deleted entries
+CHUNK_TILES_TOMBSTONE :: (^[CHUNK_SIZE][CHUNK_SIZE]Tile)(uintptr(1))
+
+TILE_MAP_CAP :: 4096
+
+Tile_Map :: struct {
+	len: int,
+	chunks: [TILE_MAP_CAP]Tile_Chunk,
 }
 
 Tile_Row :: ^[CHUNK_SIZE]Tile
 
 tile_chunk_get_row :: proc(
-	tile_map: Tile_Chunk,
+	chunk: Tile_Chunk,
 	y_offset: i32,
 ) -> (
 	Tile_Row,
 	bool,
 ) {
-	if tile_map.tiles == nil {
-		return nil, false
-	}
-	return slice.get_ptr(tile_map.tiles[:], int(y_offset))
+	assert(chunk.tiles != nil)
+	return slice.get_ptr(chunk.tiles[:], int(y_offset))
 }
 
 tile_row_get_ptr :: proc(tile_row: Tile_Row, x_offset: i32) -> (^Tile, bool) {
@@ -228,42 +244,24 @@ tile_row_get_ptr :: proc(tile_row: Tile_Row, x_offset: i32) -> (^Tile, bool) {
 }
 
 tile_chunk_get_ptr :: proc(
-	tile_map: Tile_Chunk,
+	chunk: Tile_Chunk,
 	offset: [2]i32,
 ) -> (
 	^Tile,
 	bool,
 ) {
-	if row, ok := tile_chunk_get_row(tile_map, offset[1]); ok {
+	if row, ok := tile_chunk_get_row(chunk, offset[1]); ok {
 		return tile_row_get_ptr(row, offset[0])
 	}
 	return nil, false
 }
 
-tile_chunk_get :: proc(tile_map: Tile_Chunk, offset: [2]i32) -> (Tile, bool) {
-	if ptr, ok := tile_chunk_get_ptr(tile_map, offset); ok {
+tile_chunk_get :: proc(chunk: Tile_Chunk, offset: [2]i32) -> (Tile, bool) {
+	if ptr, ok := tile_chunk_get_ptr(chunk, offset); ok {
 		return ptr^, true
 	}
 	return .Empty, false
 }
-
-make_static_tile_chunk :: proc "contextless" (
-	tiles: ^[CHUNK_SIZE][CHUNK_SIZE]Tile,
-) -> Tile_Chunk {
-	return {tiles}
-}
-
-// TODO: Move tile size / tile map size here?
-// Does it make sense for tile maps to have different sizes?
-Tile_Map :: struct {
-	// x,y,z
-	size: [3]i32,
-	chunks: [^]Tile_Chunk,
-}
-
-CHUNK_SIZE_BITS :: 4
-CHUNK_SIZE :: 1 << CHUNK_SIZE_BITS
-CHUNK_SIZE_MASK :: CHUNK_SIZE - 1
 
 world_pos_split_chunk :: proc(
 	tile_pos: Global_Tile_Pos,
@@ -280,23 +278,87 @@ world_pos_split_chunk :: proc(
 		tile_pos.xy & CHUNK_SIZE_MASK
 }
 
+@(private)
+chunk_pos_hash :: proc(pos: [3]i32) -> Tile_Hash {
+	// TODO: Real hash function
+	return 19 * Tile_Hash(pos.x) + 7 * Tile_Hash(pos.y) + 3 * Tile_Hash(pos.z)
+}
+
 tile_map_get_chunk :: proc(
-	tile_map: Tile_Map,
+	tile_map: ^Tile_Map,
 	chunk_pos: Global_Chunk_Pos,
 ) -> (
 	chunk: ^Tile_Chunk,
 	ok: bool,
 ) {
-	if !in_bounds(chunk_pos, 0, tile_map.size) do return
-	tile_index := int(
-		(chunk_pos.z * tile_map.size.y + chunk_pos.y) * tile_map.size.x +
-		chunk_pos.x,
-	)
-	return &tile_map.chunks[tile_index], true
+	// Hash used for index
+	hash := chunk_pos_hash(chunk_pos)
+	assert(math.is_power_of_two(len(tile_map.chunks)))
+	mask := Tile_Hash(len(tile_map.chunks) - 1)
+
+	for offset in 0 ..< Tile_Hash(len(tile_map.chunks)) {
+		index := (hash + offset) & mask
+		chunk := &tile_map.chunks[index]
+		if chunk.tiles == nil {
+			return nil, false
+		}
+		if chunk.hash == hash && chunk.pos == chunk_pos {
+			return chunk, true
+		}
+	}
+	return nil, false
+}
+
+tile_map_get_or_alloc_chunk :: proc(
+	tile_map: ^Tile_Map,
+	chunk_pos: Global_Chunk_Pos,
+	allocator := context.allocator,
+) -> (
+	chunk: ^Tile_Chunk,
+	ok: bool,
+) {
+	// Hash used for index
+	hash := chunk_pos_hash(chunk_pos)
+	assert(math.is_power_of_two(len(tile_map.chunks)))
+	mask := Tile_Hash(len(tile_map.chunks) - 1)
+
+	for offset in 0 ..< Tile_Hash(len(tile_map.chunks)) {
+		index := (hash + offset) & mask
+		chunk := &tile_map.chunks[index]
+		if chunk.tiles == nil || chunk.tiles == CHUNK_TILES_TOMBSTONE {
+			new_tiles, err := new(type_of(chunk.tiles^))
+			if err != nil {
+				return nil, false
+			}
+			chunk^ = {
+				pos = chunk_pos,
+				hash = hash,
+				tiles = new_tiles,
+			}
+			tile_map.len += 1
+			return chunk, true
+		}
+		if chunk.hash == hash && chunk.pos == chunk_pos {
+			return chunk, true
+		}
+	}
+	return nil, false
+}
+
+tile_map_delete_chunk :: proc(
+	tile_map: ^Tile_Map,
+	chunk_pos: Global_Chunk_Pos,
+	allocator := context.allocator,
+) {
+	chunk, found := tile_map_get_chunk(tile_map, chunk_pos)
+	if !found do return
+	free(chunk.tiles, allocator)
+	chunk.tiles = CHUNK_TILES_TOMBSTONE
+	tile_map.len -= 1
 }
 
 tile_map_get_tile_in_chunk :: proc(
-	tile_map: Tile_Map,
+	tile_map: ^Tile_Map,
 	chunk_pos: Global_Chunk_Pos,
 	// TODO: Naming convention to distinguish between global and chunk-local
 	// tile positions
@@ -310,7 +372,7 @@ tile_map_get_tile_in_chunk :: proc(
 }
 
 tile_map_get_tile_ptr :: proc(
-	tile_map: Tile_Map,
+	tile_map: ^Tile_Map,
 	tile_pos: [3]i32,
 ) -> (
 	^Tile,
@@ -321,7 +383,7 @@ tile_map_get_tile_ptr :: proc(
 }
 
 tile_map_get_tile_or_default :: proc(
-	tile_map: Tile_Map,
+	tile_map: ^Tile_Map,
 	tile_pos: [3]i32,
 	default := Tile.Wall,
 ) -> Tile {
@@ -333,7 +395,7 @@ tile_map_get_tile_or_default :: proc(
 }
 
 tile_map_get_tile_or_alloc_chunk :: proc(
-	tile_map: Tile_Map,
+	tile_map: ^Tile_Map,
 	tile_pos: Global_Tile_Pos,
 	allocator := context.allocator,
 ) -> (
@@ -341,31 +403,24 @@ tile_map_get_tile_or_alloc_chunk :: proc(
 	ok: bool,
 ) {
 	chunk_pos, tile_pos := world_pos_split_chunk(tile_pos)
-	if tile, ok = tile_map_get_tile_in_chunk(tile_map, chunk_pos, tile_pos);
-	   ok {
-		return
-	}
-
-	chunk: ^Tile_Chunk
-	if chunk, ok = tile_map_get_chunk(tile_map, chunk_pos); !ok {
-		return
-	}
-
-	if new_tiles, err := new(type_of(chunk.tiles^)); err == nil {
-		chunk.tiles = new_tiles
-	} else {
-		return nil, false
-	}
+	chunk := tile_map_get_or_alloc_chunk(
+		tile_map,
+		chunk_pos,
+		allocator,
+	) or_return
 	return tile_chunk_get_ptr(chunk^, tile_pos)
 }
 
-can_move_in_tile_map_norm :: proc(tile_map: Tile_Map, pos: World_Pos) -> bool {
+can_move_in_tile_map_norm :: proc(
+	tile_map: ^Tile_Map,
+	pos: World_Pos,
+) -> bool {
 	assert(pos_is_normalized(pos))
 	tile, ok := tile_map_get_tile_ptr(tile_map, pos.tile)
 	return ok && tile^ != .Wall
 }
 
-can_move_in_tile_map :: proc(tile_map: Tile_Map, pos: World_Pos) -> bool {
+can_move_in_tile_map :: proc(tile_map: ^Tile_Map, pos: World_Pos) -> bool {
 	return can_move_in_tile_map_norm(tile_map, normalize_pos(pos))
 }
 
