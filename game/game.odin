@@ -19,17 +19,19 @@ State :: struct {
 	initialized: bool,
 	world: World,
 	camera_pos: World_Pos,
-	camera_follow_entity_index: int,
-	controller_to_player_entity: [VIRT_CONTROLLER_COUNT]int,
+	camera_follow_entity_index: Entity_ID,
+	controller_to_player_entity: [VIRT_CONTROLLER_COUNT]Entity_ID,
 	world_arena: mem.Arena,
 	background_texture: Bmp_Image,
 	hero_textures: [Direction]Player_Textures,
 	hero_shadow_texture: Bmp_Image,
-	entities: [MAX_ENTITY_COUNT]Entity,
-	entity_count: int,
+	entities: [dynamic; MAX_ENTITY_COUNT]Entity,
 }
 
-MAX_ENTITY_COUNT :: 256
+MAX_ENTITY_COUNT :: 10_000
+
+Entity_ID :: distinct u32
+ENTITY_NIL: Entity_ID : 0
 
 Entity_Type :: enum {
 	None = 0,
@@ -54,10 +56,6 @@ Entity :: struct {
 	z: f32,
 	face_dir: Direction,
 	dim: [2]f32,
-}
-
-World :: struct {
-	tile_map: Tile_Map,
 }
 
 Player_Textures :: struct {
@@ -179,13 +177,12 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 		}
 
 		// TODO: Why is this necessary?
-		state.entity_count = 0
-		nil_entity, nil_entity_index :=
+		nil_entity, nil_entity_id :=
 			add_entity(state) or_else panic("failed to create nil entity")
-		assert(nil_entity_index == 0)
+		assert(nil_entity_id == ENTITY_NIL)
 		assert(nil_entity.type == .None)
 
-		if player_entity, index, ok := add_entity(state); ok {
+		if player_entity, player_id, ok := add_entity(state); ok {
 			player_entity^ = {
 				type = .Hero,
 				face_dir = .Front,
@@ -195,8 +192,8 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 				},
 				dim = PLAYER_COLLISION_SIZE,
 			}
-			state.controller_to_player_entity[KEYBOARD_FULL_INDEX] = index
-			state.camera_follow_entity_index = index
+			state.controller_to_player_entity[KEYBOARD_FULL_INDEX] = player_id
+			state.camera_follow_entity_index = player_id
 		} else {
 			panic("failed to add player entity")
 		}
@@ -251,17 +248,19 @@ load_hero_textures :: proc(
 gen_world :: proc(state: ^State) {
 	SCREENS_X :: 128
 	SCREENS_Y :: 128
-	SCREEN_COUNT :: 2
+	// SCREEN_COUNT :: 2
 
 	mem.arena_free_all(&state.world_arena)
 	context.allocator = mem.arena_allocator(&state.world_arena)
 
-	state.world.tile_map = {}
+	state.world = {}
 
 	rand.reset(2)
 	screen_x, screen_y, screen_z: i32
 	door_left, door_right, door_bottom, door_top, stair, stair_exit: bool
-	for screen_i in 0 ..< SCREEN_COUNT {
+	// NOTE: This may generate partial worlds if it runs out of memory
+	gen_loop: for cap(state.entities) - len(state.entities) >=
+	    16 + (VIEW_TILES_WIDTH + VIEW_TILES_HEIGHT * 2) {
 		// TODO: Custom RNG
 		// Can't add a stair if there is already a stair exit here
 		r := rand.uint_max(stair_exit ? 2 : 2)
@@ -283,54 +282,47 @@ gen_world :: proc(state: ^State) {
 					screen_y * VIEW_TILES_HEIGHT + y,
 					screen_z,
 				}
-				tile, ok := tile_map_get_tile_or_alloc_chunk(
-					&state.world.tile_map,
-					pos,
-				)
-				assert(ok)
+				chunk, ok := world_get_or_alloc_chunk(&state.world, pos)
+				if !ok do break gen_loop
+				tile: Entity_Type
+
+				// TODO: Add door and stair entities
 				if x == 0 {
 					if y == VIEW_TILES_HEIGHT / 2 && door_left {
-						tile^ = .Door
+						// tile = .Door
 					} else {
-						tile^ = .Wall
+						tile = .Wall
 					}
 				} else if x == VIEW_TILES_WIDTH - 1 {
 					if y == VIEW_TILES_HEIGHT / 2 && door_right {
-						tile^ = .Door
+						// tile = .Door
 					} else {
-						tile^ = .Wall
+						tile = .Wall
 					}
 				} else if y == 0 {
 					if x == VIEW_TILES_WIDTH / 2 && door_bottom {
-						tile^ = .Door
+						// tile = .Door
 					} else {
-						tile^ = .Wall
+						tile = .Wall
 					}
 				} else if y == VIEW_TILES_HEIGHT - 1 {
 					if x == VIEW_TILES_WIDTH / 2 && door_top {
-						tile^ = .Door
+						// tile = .Door
 					} else {
-						tile^ = .Wall
+						tile = .Wall
 					}
 				} else if x == VIEW_TILES_WIDTH / 2 &&
 				   y == VIEW_TILES_HEIGHT / 2 {
 					if door_up {
-						tile^ = .Stair_Up
+						// tile = .Stair_Up
 					} else if door_down {
-						tile^ = .Stair_Down
-					} else {
-						tile^ = .Empty
+						// tile = .Stair_Down
 					}
-				} else {
-					tile^ = .Empty
 				}
 
-				// TODO: Just add wall entities instead of doing both?
-				if tile^ == .Wall {
-					entity, _ :=
-						add_entity(state) or_else panic(
-							"failed to create wall entity",
-						)
+				// TODO: Add other types of entities
+				if tile == .Wall {
+					entity, _ := add_entity(state) or_break gen_loop
 					entity^ = {
 						type = .Wall,
 						pos = {tile = pos, local = {}},
@@ -477,21 +469,33 @@ handmade_game_update :: proc "contextless" (
 	}
 }
 
-add_entity :: proc(state: ^State) -> (entity: ^Entity, index: int, ok: bool) {
-	if state.entity_count >= MAX_ENTITY_COUNT do return
+add_entity :: proc(
+	state: ^State,
+) -> (
+	entity: ^Entity,
+	id: Entity_ID,
+	ok: bool,
+) {
+	id = Entity_ID(len(state.entities))
+	if _, ok := append_nothing(&state.entities); !ok {
+		return
+	}
 
 	ok = true
-	index = state.entity_count
-	state.entity_count += 1
-
-	entity = &state.entities[index]
+	entity = &state.entities[id]
 	// Clear out for good measure
 	entity^ = {}
 	return
 }
 
-get_entity :: proc(state: ^State, index: int) -> (entity: ^Entity, ok: bool) {
-	entity = slice.get_ptr(state.entities[:], index) or_return
+get_entity :: proc(
+	state: ^State,
+	id: Entity_ID,
+) -> (
+	entity: ^Entity,
+	ok: bool,
+) {
+	entity = slice.get_ptr(state.entities[:], int(id)) or_return
 	if entity.type == .None do return nil, false
 	return entity, true
 }
@@ -502,21 +506,21 @@ handle_controller_input :: proc(
 	controller_index: int,
 	controller: api.Controller,
 ) {
-	entity_index := state.controller_to_player_entity[controller_index]
-	if entity_index == 0 {
+	entity_id := state.controller_to_player_entity[controller_index]
+	if entity_id == ENTITY_NIL {
 		return
 	}
 
-	update_player_movement(state, entity_index, dt_sec, controller)
+	update_player_movement(state, entity_id, dt_sec, controller)
 }
 
 update_player_movement :: proc(
 	state: ^State,
-	entity_index: int,
+	entity_id: Entity_ID,
 	dt_sec: f32,
 	controller: api.Controller,
 ) {
-	player := &state.entities[entity_index]
+	player := &state.entities[entity_id]
 	// Save for later after movement computation
 	old_tile_pos := player.pos.tile
 	// TODO: Support analog sticks
@@ -613,9 +617,9 @@ update_player_movement :: proc(
 		collide_norm: [2]f32
 		collide_entity: ^Entity
 
-		for &entity, index in state.entities[:state.entity_count] {
+		for &entity, index in state.entities {
 			if !entity_can_collide(entity.type) do continue
-			if index == entity_index do continue
+			if Entity_ID(index) == entity_id do continue
 			if entity.pos.tile.z != player.pos.tile.z do continue
 
 			// TODO: Include local position here as well and don't pass local
@@ -666,17 +670,18 @@ update_player_movement :: proc(
 		}
 	}
 
-	if player.pos.tile != old_tile_pos {
-		#partial switch tile_map_get_tile_or_default(
-			&state.world.tile_map,
-			player.pos.tile,
-		) {
-		case .Stair_Up:
-			player.pos.tile.z += 1
-		case .Stair_Down:
-			player.pos.tile.z -= 1
-		}
-	}
+	// TODO: Handle stairs
+	// if player.pos.tile != old_tile_pos {
+	// 	#partial switch tile_map_get_tile_or_default(
+	// 		&state.world,
+	// 		player.pos.tile,
+	// 	) {
+	// 	case .Stair_Up:
+	// 		player.pos.tile.z += 1
+	// 	case .Stair_Down:
+	// 		player.pos.tile.z -= 1
+	// 	}
+	// }
 }
 
 Axis :: enum {
@@ -1001,7 +1006,7 @@ handmade_game_render :: proc "contextless" (
 
 	// Render in reverse order so that the player is on top
 	// TODO: Do actual render ordering
-	#reverse for entity in state.entities[:state.entity_count] {
+	#reverse for entity in state.entities {
 		switch entity.type {
 		case .None:
 		case .Wall:
