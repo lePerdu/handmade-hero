@@ -65,7 +65,7 @@ GAME_TEMP_MEMORY_SIZE :: 1 << 30
 GAME_PERSIST_MEM_ADDR: uintptr : 0x0000_1000_0000_0000
 
 main :: proc() {
-	context.logger = log.create_console_logger(lowest = .Debug)
+	context.logger = log.create_console_logger(lowest = .Info)
 
 	state: State
 	setup_paths(&state)

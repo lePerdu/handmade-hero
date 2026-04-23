@@ -3,42 +3,100 @@ package game
 import "base:intrinsics"
 import "core:math"
 import "core:math/linalg"
-import "core:slice"
 import "core:testing"
 
-Global_Chunk_Pos :: [3]i32
-Global_Tile_Pos :: [3]i32
-Chunk_Tile_Pos :: [2]i32
-Local_Tile_Pos :: [2]f32
+Chunk_Pos :: [3]i32
+Local_Pos :: [2]f32
 
-// World-relative position. Each `[2]T` is a pair of `x` and `y`, with positive
-// going to the right and up.
+// TODO: Rename to "tiles"?
+CHUNK_SIZE_METERS :: 64
+// TODO: Rename?
+LOCAL_MIN :: -CHUNK_SIZE_METERS / 2
+LOCAL_MAX :: CHUNK_SIZE_METERS / 2
+
+// World-relative position
 World_Pos :: struct {
-	// Position of of the tile
-	tile: Global_Tile_Pos,
-	// Position within the tile, relative to its center, from [-0.5, 0.5)
-	local: Local_Tile_Pos,
-	// TODO: Store `local` as f16 when packing?
+	chunk: Chunk_Pos,
+	// Position within the chunk, relative to its center, from
+	// [0, CHUNK_SIZE_METERS)
+	local: Local_Pos,
 }
 
+make_world_pos_i32 :: proc(tile_pos: [3]i32) -> World_Pos {
+	// TODO: Pre-normalize incoming integer to avoid rounding errors
+	// NOTE: tile_pos.z is not handled correctly.
+	// TODO: Fix this by making `local` 3D?
+	return normalize_pos(
+		{
+			chunk = {0, 0, tile_pos.z / CHUNK_SIZE_METERS},
+			local = linalg.to_f32(tile_pos.xy),
+		},
+	)
+}
+
+make_world_pos_i64 :: proc(tile_pos: [3]i64) -> World_Pos {
+	// NOTE: tile_pos.z is not handled correctly.
+	// TODO: Fix this by making `local` 3D?
+	return normalize_pos(
+		{
+			chunk = {0, 0, i32(tile_pos.z / CHUNK_SIZE_METERS)},
+			local = linalg.to_f32(tile_pos.xy),
+		},
+	)
+}
+
+make_world_pos_f32 :: proc(tile_pos: [3]f32) -> World_Pos {
+	// NOTE: tile_pos.z is not handled correctly.
+	// TODO: Fix this by making `local` 3D?
+	return normalize_pos(
+		{
+			chunk = {0, 0, i32(tile_pos.z / CHUNK_SIZE_METERS)},
+			local = tile_pos.xy,
+		},
+	)
+}
+
+make_world_pos :: proc {
+	make_world_pos_i32,
+	make_world_pos_i64,
+	make_world_pos_f32,
+}
+
+// TODO: Return distinct type that can be accepted by world_pos_xy?
 world_pos_sub :: proc(a, b: World_Pos) -> World_Pos {
-	return {tile = a.tile - b.tile, local = a.local - b.local}
+	return {chunk = a.chunk - b.chunk, local = a.local - b.local}
+}
+
+world_pos_tile :: proc(pos: World_Pos) -> [3]i64 {
+	return(
+		CHUNK_SIZE_METERS * linalg.to_i64(pos.chunk) +
+		{i64(math.round(pos.local.x)), i64(math.round(pos.local.y)), 0} \
+	)
+}
+
+world_pos_round :: proc(pos: World_Pos) -> World_Pos {
+	return {chunk = pos.chunk, local = linalg.round(pos.local)}
 }
 
 // "Flatten" a world coordinate into a single xy coordinate
-// `pos.tile` should be relatively small to avoid precision errors
-world_pos_xy :: proc(pos: World_Pos) -> [2]f32 {
-	return linalg.to_f32(pos.tile).xy + pos.local
+// `pos.chunk` should be relatively small to avoid precision errors
+world_pos_xy :: proc(pos: World_Pos) -> Local_Pos {
+	return CHUNK_SIZE_METERS * linalg.to_f32(pos.chunk).xy + pos.local
 }
 
 world_pos_sub_xy :: proc(a, b: World_Pos) -> [2]f32 {
-	return linalg.to_f32(a.tile.xy - b.tile.xy) + a.local - b.local
+	return(
+		CHUNK_SIZE_METERS * linalg.to_f32(a.chunk.xy - b.chunk.xy) +
+		(a.local - b.local) \
+	)
 }
 
 world_pos_dist2 :: proc(a, b: World_Pos) -> f32 {
 	delta := world_pos_sub(a, b)
 	delta_xy := world_pos_xy(delta)
-	return linalg.length2([3]f32{delta_xy.x, delta_xy.y, f32(delta.tile.z)})
+	return linalg.length2(
+		[3]f32{delta_xy.x, delta_xy.y, CHUNK_SIZE_METERS * f32(delta.chunk.z)},
+	)
 }
 
 world_pos_dist :: proc(a, b: World_Pos) -> f32 {
@@ -51,24 +109,24 @@ world_pos_min :: proc(a, b: World_Pos) -> World_Pos {
 	assert(pos_is_normalized(b))
 
 	axis_min :: proc(
-		a_tile, b_tile: i32,
+		a_chunk, b_chunk: i32,
 		a_local, b_local: f32,
 	) -> (
-		tile: i32,
+		chunk: i32,
 		local: f32,
 	) {
-		if a_tile < b_tile {
-			return a_tile, a_local
+		if a_chunk < b_chunk {
+			return a_chunk, a_local
 		}
-		if b_tile < a_tile {
-			return b_tile, b_local
+		if b_chunk < a_chunk {
+			return b_chunk, b_local
 		}
-		return a_tile, min(a_local, b_local)
+		return a_chunk, min(a_local, b_local)
 	}
-	tile_x, local_x := axis_min(a.tile.x, b.tile.x, a.local.x, b.local.x)
-	tile_y, local_y := axis_min(a.tile.y, b.tile.y, a.local.y, b.local.y)
-	tile_z := min(a.tile.z, b.tile.z)
-	return {tile = {tile_x, tile_y, tile_z}, local = {local_x, local_y}}
+	chunk_x, local_x := axis_min(a.chunk.x, b.chunk.x, a.local.x, b.local.x)
+	chunk_y, local_y := axis_min(a.chunk.y, b.chunk.y, a.local.y, b.local.y)
+	chunk_z := min(a.chunk.z, b.chunk.z)
+	return {chunk = {chunk_x, chunk_y, chunk_z}, local = {local_x, local_y}}
 }
 
 // Positions must be normalized
@@ -77,24 +135,24 @@ world_pos_max :: proc(a, b: World_Pos) -> World_Pos {
 	assert(pos_is_normalized(b))
 
 	axis_max :: proc(
-		a_tile, b_tile: i32,
+		a_chunk, b_chunk: i32,
 		a_local, b_local: f32,
 	) -> (
-		tile: i32,
+		chunk: i32,
 		local: f32,
 	) {
-		if a_tile > b_tile {
-			return a_tile, a_local
+		if a_chunk > b_chunk {
+			return a_chunk, a_local
 		}
-		if b_tile > a_tile {
-			return b_tile, b_local
+		if b_chunk > a_chunk {
+			return b_chunk, b_local
 		}
-		return a_tile, max(a_local, b_local)
+		return a_chunk, max(a_local, b_local)
 	}
-	tile_x, local_x := axis_max(a.tile.x, b.tile.x, a.local.x, b.local.x)
-	tile_y, local_y := axis_max(a.tile.y, b.tile.y, a.local.y, b.local.y)
-	tile_z := max(a.tile.z, b.tile.z)
-	return {tile = {tile_x, tile_y, tile_z}, local = {local_x, local_y}}
+	chunk_x, local_x := axis_max(a.chunk.x, b.chunk.x, a.local.x, b.local.x)
+	chunk_y, local_y := axis_max(a.chunk.y, b.chunk.y, a.local.y, b.local.y)
+	chunk_z := max(a.chunk.z, b.chunk.z)
+	return {chunk = {chunk_x, chunk_y, chunk_z}, local = {local_x, local_y}}
 }
 
 world_pos_min_max :: proc(a, b: World_Pos) -> (min, max: World_Pos) {
@@ -110,12 +168,10 @@ normalize_pos :: proc(pos: World_Pos) -> World_Pos {
 	//   be always sufficient?)
 	// - Temporarily use fixed point?
 	// - What about wrap-around? Just wrap to the other side of the world?
-	local_from_corner := pos.local + 0.5
-	tile_shift_2 := linalg.to_i32(linalg.floor(local_from_corner))
-	tile_shift := Global_Tile_Pos{tile_shift_2[0], tile_shift_2[1], 0}
+	chunk_shift_xy := linalg.floor(pos.local / CHUNK_SIZE_METERS)
 	return {
-		tile = pos.tile + tile_shift,
-		local = linalg.fract(local_from_corner) - 0.5,
+		chunk = pos.chunk + {i32(chunk_shift_xy.x), i32(chunk_shift_xy.y), 0},
+		local = pos.local - chunk_shift_xy * CHUNK_SIZE_METERS,
 	}
 }
 
@@ -129,15 +185,15 @@ test_norm_pos :: proc(t: ^testing.T) {
 		normalize_pos({local = {0.25, -0.4}}),
 		World_Pos{local = {0.25, -0.4}},
 	)
-	// Wrap at +0.5, not at -0.5
+	// Wrap at +max but not at -min
 	testing.expect_value(
 		t,
-		normalize_pos({local = {-0.5, +0.5}}),
-		World_Pos{tile = {0, 1, 0}, local = {-0.5, -0.5}},
+		normalize_pos({local = {LOCAL_MIN, +LOCAL_MAX}}),
+		World_Pos{chunk = {0, 1, 0}, local = {LOCAL_MIN, LOCAL_MIN}},
 	)
 
-	HALF_MINUS_EPSILON :: (1 - math.F32_EPSILON) / 2
-	HALF_PLUS_EPSILON :: (1 + math.F32_EPSILON) / 2
+	HALF_MINUS_EPSILON :: (1 - math.F32_EPSILON) / 2 * CHUNK_SIZE_METERS
+	HALF_PLUS_EPSILON :: (1 + math.F32_EPSILON) / 2 * CHUNK_SIZE_METERS
 
 	testing.expect_value(
 		t,
@@ -148,22 +204,30 @@ test_norm_pos :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		normalize_pos({local = {HALF_PLUS_EPSILON, -HALF_PLUS_EPSILON}}),
-		World_Pos{tile = {+1, -1, 0}, local = {-0.5, HALF_MINUS_EPSILON}},
+		World_Pos {
+			chunk = {+1, -1, 0},
+			local = {LOCAL_MIN, HALF_MINUS_EPSILON},
+		},
 	)
 
 	testing.expect_value(
 		t,
-		normalize_pos({local = {-4.5, 91.54}}),
-		// Not quite -0.5 due to rounding
+		normalize_pos(
+			{local = {-4.5 * CHUNK_SIZE_METERS, 91.54 * CHUNK_SIZE_METERS}},
+		),
+		// Not quite LOCAL_MIN due to rounding
 		// TODO: Make comparison more reliable?
-		World_Pos{tile = {-4, 92, 0}, local = {-0.5, -0.45999908}},
+		World_Pos{chunk = {-4, 92, 0}, local = {LOCAL_MIN, -0.45999908}},
 	)
 
 	F32_MAX_INT :: 1 << (math.F32_MANT_DIG - 1) - 1
 	testing.expect_value(
 		t,
-		normalize_pos({local = {-F32_MAX_INT - 0.5, F32_MAX_INT}}),
-		World_Pos{tile = {-F32_MAX_INT, F32_MAX_INT, 0}, local = {-0.5, 0}},
+		normalize_pos({local = {-F32_MAX_INT - LOCAL_MAX, F32_MAX_INT}}),
+		World_Pos {
+			chunk = {-F32_MAX_INT, F32_MAX_INT, 0},
+			local = {LOCAL_MIN, 0},
+		},
 	)
 }
 
@@ -183,7 +247,7 @@ in_bounds :: proc(
 }
 
 pos_is_normalized :: proc(pos: World_Pos) -> bool {
-	return in_bounds(pos.local, -0.5, 0.5)
+	return in_bounds(pos.local, 0, CHUNK_SIZE_METERS)
 }
 
 // TODO: Add non-normalized version?
@@ -219,30 +283,15 @@ World :: struct {
 	chunk_table: [4096]World_Chunk,
 }
 
-world_pos_split_chunk :: proc(
-	tile_pos: Global_Tile_Pos,
-) -> (
-	Global_Chunk_Pos,
-	Chunk_Tile_Pos,
-) {
-	// TODO: Report issue for supporting `>>` on arrays?
-	return [?]i32 {
-			tile_pos.x >> CHUNK_SIZE_BITS,
-			tile_pos.y >> CHUNK_SIZE_BITS,
-			tile_pos.z,
-		},
-		tile_pos.xy & CHUNK_SIZE_MASK
-}
-
 @(private)
-chunk_pos_hash :: proc(pos: [3]i32) -> Tile_Hash {
+chunk_pos_hash :: proc(pos: Chunk_Pos) -> Tile_Hash {
 	// TODO: Real hash function
 	return 19 * Tile_Hash(pos.x) + 7 * Tile_Hash(pos.y) + 3 * Tile_Hash(pos.z)
 }
 
 world_get_chunk :: proc(
 	world: ^World,
-	chunk_pos: Global_Chunk_Pos,
+	chunk_pos: Chunk_Pos,
 ) -> (
 	chunk: ^World_Chunk,
 	ok: bool,
@@ -267,7 +316,7 @@ world_get_chunk :: proc(
 
 world_get_or_alloc_chunk :: proc(
 	world: ^World,
-	chunk_pos: Global_Chunk_Pos,
+	chunk_pos: Chunk_Pos,
 	allocator := context.allocator,
 ) -> (
 	chunk: ^World_Chunk,
@@ -300,4 +349,29 @@ world_get_or_alloc_chunk :: proc(
 		}
 	}
 	return nil, false
+}
+
+world_chunk_alloc_entity :: proc(
+	chunk: ^World_Chunk,
+) -> (
+	id_ref: ^Entity_ID,
+	ok: bool,
+) {
+	if chunk.first_block == nil ||
+	   len(chunk.first_block.entities) == cap(chunk.first_block.entities) {
+		if new_block, err := new(Entity_Block); err == nil {
+			new_block^ = {
+				next = chunk.first_block,
+			}
+			chunk.first_block = new_block
+		} else {
+			return
+		}
+	}
+	if _, ok = append_nothing(&chunk.first_block.entities); ok {
+		id_ref = &chunk.first_block.entities[len(chunk.first_block.entities) - 1]
+		return
+	} else {
+		panic("expected append to succeed")
+	}
 }

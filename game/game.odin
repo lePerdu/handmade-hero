@@ -83,7 +83,7 @@ make_rect_min_dim :: proc(min, dim: [2]$T) -> Rect(T) {
 }
 
 make_rect_min_max :: proc(min, max: [2]$T) -> Rect(T) {
-	assert(max > min)
+	assert(max.x >= min.x && max.y >= min.y)
 	return {min = min, dim = max - min}
 }
 
@@ -171,10 +171,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 	if !state.initialized {
 		state^ = {}
 		mem.arena_init(&state.world_arena, memory.persistent[size_of(State):])
-		state.camera_pos = {
-			tile = {VIEW_TILES_WIDTH / 2, VIEW_TILES_HEIGHT / 2, 0},
-			local = 0,
-		}
+		state.camera_pos = {}
 
 		// TODO: Why is this necessary?
 		nil_entity, nil_entity_id :=
@@ -186,10 +183,9 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 			player_entity^ = {
 				type = .Hero,
 				face_dir = .Front,
-				pos = {
-					tile = {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
-					local = {-0.5, -0.5},
-				},
+				pos = make_world_pos_f32(
+					0, // {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
+				),
 				dim = PLAYER_COLLISION_SIZE,
 			}
 			state.controller_to_player_entity[KEYBOARD_FULL_INDEX] = player_id
@@ -238,10 +234,7 @@ load_hero_textures :: proc(
 		head = head,
 		cape = cape,
 		torso = torso,
-		align_px = {
-			i32(torso.width) / 2,
-			i32(PLAYER_COLLISION_SIZE.y * TILE_SIZE_PX / 2),
-		},
+		align_px = {i32(torso.width) / 2, 35},
 	}
 }
 
@@ -277,7 +270,7 @@ gen_world :: proc(state: ^State) {
 
 		for y in 0 ..< i32(VIEW_TILES_HEIGHT) {
 			for x in 0 ..< i32(VIEW_TILES_WIDTH) {
-				pos := Global_Tile_Pos {
+				pos := [3]i32 {
 					screen_x * VIEW_TILES_WIDTH + x,
 					screen_y * VIEW_TILES_HEIGHT + y,
 					screen_z,
@@ -322,12 +315,7 @@ gen_world :: proc(state: ^State) {
 
 				// TODO: Add other types of entities
 				if tile == .Wall {
-					entity, _ := add_entity(state) or_break gen_loop
-					entity^ = {
-						type = .Wall,
-						pos = {tile = pos, local = {}},
-						dim = 1,
-					}
+					add_wall(state, chunk, pos) or_break gen_loop
 				}
 			}
 		}
@@ -348,6 +336,27 @@ gen_world :: proc(state: ^State) {
 			screen_z = (screen_z + 1) % 2
 		}
 	}
+}
+
+add_wall :: proc(
+	state: ^State,
+	chunk: ^World_Chunk,
+	tile_pos: [3]i32,
+) -> (
+	entity: ^Entity,
+	id: Entity_ID,
+	ok: bool,
+) {
+	chunk_ref := world_chunk_alloc_entity(chunk) or_return
+	entity, id = add_entity(state) or_return
+	chunk_ref^ = id
+	entity^ = {
+		type = .Wall,
+		pos = make_world_pos(tile_pos),
+		dim = 1,
+	}
+	ok = true
+	return
 }
 
 keyboard_controller_full :: proc(
@@ -450,21 +459,19 @@ handmade_game_update :: proc "contextless" (
 		state,
 		state.camera_follow_entity_index,
 	); ok {
-		target_pos := camera_follow_target.pos
 		MOVE_CAMERA_IN_CHUNKS :: true
-		if MOVE_CAMERA_IN_CHUNKS {
-			state.camera_pos = World_Pos {
-				// Move camera by window-sized chunks
-				tile = (target_pos.tile / VIEW_TILES_DIMS) *
-					VIEW_TILES_DIMS + VIEW_TILES_DIMS / 2,
-				local = 0,
-			}
+		when MOVE_CAMERA_IN_CHUNKS {
+			target_tile := world_pos_tile(camera_follow_target.pos)
+			VIEW_TILES_DIMS: [3]i64 : {VIEW_TILES_WIDTH, VIEW_TILES_HEIGHT, 1}
+			state.camera_pos = make_world_pos(
+				(target_tile / VIEW_TILES_DIMS) * VIEW_TILES_DIMS,
+			)
+			state.camera_pos = offset_pos(
+				state.camera_pos,
+				{VIEW_TILES_WIDTH - 1, VIEW_TILES_HEIGHT - 1} / 2,
+			)
 		} else {
-			state.camera_pos = World_Pos {
-				// Center player
-				tile = target_pos.tile,
-				local = target_pos.local,
-			}
+			state.camera_pos = camera_follow_target.pos
 		}
 	}
 }
@@ -521,8 +528,6 @@ update_player_movement :: proc(
 	controller: api.Controller,
 ) {
 	player := &state.entities[entity_id]
-	// Save for later after movement computation
-	old_tile_pos := player.pos.tile
 	// TODO: Support analog sticks
 
 	// Sign of the movement: -1, 0, +1
@@ -593,9 +598,6 @@ update_player_movement :: proc(
 	for remaining_dt_sec > 0 {
 		target_dp := player.vel.xy * remaining_dt_sec
 		target_pos := offset_pos(player.pos, target_dp)
-		if target_pos.tile == {5, 0, 0} {
-			log.infof("passing through wall")
-		}
 
 		// Min/max based on the player's position
 		region_min, region_max := world_pos_min_max(player.pos, target_pos)
@@ -609,9 +611,10 @@ update_player_movement :: proc(
 		// TODO: Center player pos/bounding box to avoid asymmetric adjustments
 		COLLISION_PADDING: [2]f32 : 0.05
 		min_tile :=
-			offset_pos(region_min, {-PLAYER_COLLISION_SIZE.x / 2, 0} - COLLISION_PADDING).tile.xy
+			world_pos_tile(offset_pos(region_min, {-PLAYER_COLLISION_SIZE.x / 2, 0} - COLLISION_PADDING)).xy
 		max_tile :=
-			offset_pos(region_max, {PLAYER_COLLISION_SIZE.x / 2, PLAYER_COLLISION_SIZE.y} + COLLISION_PADDING).tile.xy
+			world_pos_tile(offset_pos(region_max, {PLAYER_COLLISION_SIZE.x / 2, PLAYER_COLLISION_SIZE.y} + COLLISION_PADDING)).xy
+		search_rect := make_rect_min_max(min_tile, max_tile)
 
 		closest_t: f32 = 1
 		collide_norm: [2]f32
@@ -620,21 +623,19 @@ update_player_movement :: proc(
 		for &entity, index in state.entities {
 			if !entity_can_collide(entity.type) do continue
 			if Entity_ID(index) == entity_id do continue
-			if entity.pos.tile.z != player.pos.tile.z do continue
+			if entity.pos.chunk.z != player.pos.chunk.z do continue
+			if !rect_contains(search_rect, world_pos_tile(entity.pos).xy) do continue
 
-			// TODO: Include local position here as well and don't pass local
-			// position to collision routines? Add collision routines that take
-			// collision boxes directly?
-			rel_target_origin := linalg.to_f32(
-				entity.pos.tile.xy - player.pos.tile.xy,
-			)
+			rel_target_origin := world_pos_sub_xy(entity.pos, player.pos)
 			coll_rect := make_rect_center_dim(
 				rel_target_origin,
 				entity.dim + player.dim,
 			)
 
+			// TODO: Remove parameter and always pass the relative position
+			// of the "target" object?
 			if t, norm, coll := collides_axis_aligned_rect(
-				player.pos.local,
+				0,
 				target_dp,
 				coll_rect,
 			); coll && t < closest_t {
@@ -669,19 +670,6 @@ update_player_movement :: proc(
 			panic("possible infinite collision detection loop")
 		}
 	}
-
-	// TODO: Handle stairs
-	// if player.pos.tile != old_tile_pos {
-	// 	#partial switch tile_map_get_tile_or_default(
-	// 		&state.world,
-	// 		player.pos.tile,
-	// 	) {
-	// 	case .Stair_Up:
-	// 		player.pos.tile.z += 1
-	// 	case .Stair_Down:
-	// 		player.pos.tile.z -= 1
-	// 	}
-	// }
 }
 
 Axis :: enum {
@@ -792,30 +780,6 @@ collides_axis_aligned_rect :: proc(
 	return
 }
 
-collides_tile :: proc(
-	pos: World_Pos, // Bottom-center of the collision box
-	dp: [2]f32,
-	// Size of collision box
-	size: [2]f32,
-	tile_pos: [2]i32,
-) -> (
-	t: f32,
-	norm: [2]f32,
-	collides: bool,
-) {
-	TILE_COLLISION_SIZE: [2]f32 : 1
-	rel_tile_origin := linalg.to_f32(tile_pos - pos.tile.xy)
-	rel_tile_bl := rel_tile_origin - TILE_COLLISION_SIZE / 2 - size / 2
-	// TODO: Make pos the center of the collision box to avoid the
-	// asymmetric adjustment?
-	return collides_axis_aligned_rect(
-		pos.local + {0, size.y / 2},
-		dp,
-		make_rect_center_dim(rel_tile_origin, TILE_COLLISION_SIZE + size),
-	)
-}
-
-
 TILE_SIZE_PX :: 60
 TILE_OFFSET_PX :: [2]f32{-TILE_SIZE_PX / 2, 0}
 Z_TO_Y_RATIO :: 0.75
@@ -839,7 +803,6 @@ WINDOW_TILES_HEIGHT :: 9
 // "middle" tile
 VIEW_TILES_WIDTH :: 17
 VIEW_TILES_HEIGHT :: 9
-VIEW_TILES_DIMS: [3]i32 : {VIEW_TILES_WIDTH, VIEW_TILES_HEIGHT, 1}
 
 Bmp_Header :: struct #packed {
 	id: [2]u8,
@@ -999,10 +962,10 @@ handmade_game_render :: proc "contextless" (
 
 	// state.camera_pos, adjusted so that it points to the bottom-left corner
 	// instead of the center
-	window_origin := World_Pos {
-		tile = state.camera_pos.tile - VIEW_TILES_DIMS / 2,
-		local = state.camera_pos.local,
-	}
+	window_origin := offset_pos(
+		state.camera_pos,
+		-{WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT} / 2,
+	)
 
 	// Render in reverse order so that the player is on top
 	// TODO: Do actual render ordering
@@ -1012,7 +975,7 @@ handmade_game_render :: proc "contextless" (
 		case .Wall:
 			assert(pos_is_normalized(entity.pos))
 			// TODO: Include 0.5 offset in render_rect_tile?
-			render_pos := world_pos_sub_xy(entity.pos, window_origin) + 0.5
+			render_pos := world_pos_sub_xy(entity.pos, window_origin)
 			// Mark entity's tile
 			render_rect_tile(
 				fb,
@@ -1029,8 +992,11 @@ handmade_game_render :: proc "contextless" (
 			// Mark entity's tile
 			render_rect_tile(
 				fb,
-				make_rect_min_dim(
-					linalg.to_f32(entity.pos.tile.xy - window_origin.tile.xy),
+				make_rect_center_dim(
+					world_pos_sub_xy(
+						world_pos_round(entity.pos),
+						window_origin,
+					),
 					1,
 				),
 				color = make_color(1.0),
@@ -1039,7 +1005,7 @@ handmade_game_render :: proc "contextless" (
 			// Mark collision box
 			render_rect_tile(
 				fb,
-				make_rect_center_dim(render_pos + 0.5, entity.dim),
+				make_rect_center_dim(render_pos, entity.dim),
 				color = make_color(0.8, 0.8, 0.0),
 			)
 
@@ -1084,7 +1050,7 @@ handmade_game_render :: proc "contextless" (
 			MARKER_SIZE :: 0.1
 			render_rect_tile(
 				fb,
-				make_rect_center_dim(render_pos + 0.5, MARKER_SIZE),
+				make_rect_center_dim(render_pos, MARKER_SIZE),
 				color = make_color(0.8, 0.0, 0.0),
 			)
 		}
@@ -1260,11 +1226,7 @@ render_rect :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
 }
 
 render_rect_tile :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
-	render_rect(
-		fb,
-		rect_offset(rect_scale(rect, TILE_SIZE_PX), TILE_OFFSET_PX),
-		color = color,
-	)
+	render_rect(fb, rect_scale(rect, TILE_SIZE_PX), color = color)
 }
 
 render_bmp :: proc(
@@ -1274,10 +1236,10 @@ render_bmp :: proc(
 	img: Bmp_Image,
 	extra_alpha: f32 = 1.0,
 ) {
-	pos := pos - linalg.to_f32(align)
+	base := pos - linalg.to_f32(align)
 	region := map_px_region(
 		fb,
-		round_int(pos),
+		round_int(base),
 		{int(img.width), int(img.height)},
 	)
 
