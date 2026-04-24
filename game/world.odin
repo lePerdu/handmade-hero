@@ -403,8 +403,8 @@ world_chunk_remove_entity :: proc(
 	for block := chunk.first_block; block != nil; block = block.next {
 		for test_id, index in block.entities {
 			if test_id == id {
-				block.entities[index] =
-					chunk.first_block.entities[len(chunk.first_block.entities) - 1]
+				swap_index := len(chunk.first_block.entities) - 1
+				block.entities[index] = chunk.first_block.entities[swap_index]
 				pop(&chunk.first_block.entities)
 				if len(chunk.first_block.entities) == 0 {
 					old_block := chunk.first_block
@@ -438,4 +438,104 @@ world_update_entity_chunk :: proc(
 		arena,
 	) or_return
 	return world_chunk_add_entity(new_chunk, id, arena)
+}
+
+World_Chunk_XYRegion_Iter :: struct {
+	min_chunk, max_chunk: [2]i32,
+	cur_chunk: [3]i32,
+	done: bool,
+}
+
+world_chunk_xy_iter := proc(
+	min_chunk, max_chunk: [2]i32,
+	z_chunk: i32,
+) -> World_Chunk_XYRegion_Iter {
+	assert(min_chunk.x <= max_chunk.x)
+	assert(min_chunk.y <= max_chunk.y)
+	return {
+		min_chunk = min_chunk,
+		max_chunk = max_chunk,
+		cur_chunk = {min_chunk.x, min_chunk.y, z_chunk},
+		done = false,
+	}
+}
+
+world_chunk_xy_next :: proc(
+	world: ^World,
+	iter: ^World_Chunk_XYRegion_Iter,
+) -> (
+	chunk: ^World_Chunk,
+	ok: bool,
+) {
+	for !iter.done {
+		next, exists := world_get_chunk(world, iter.cur_chunk)
+		if iter.cur_chunk.x < iter.max_chunk.x {
+			iter.cur_chunk.x += 1
+		} else {
+			iter.cur_chunk.x = iter.min_chunk.x
+			if iter.cur_chunk.y < iter.max_chunk.y {
+				iter.cur_chunk.y += 1
+			} else {
+				iter.done = true
+			}
+		}
+
+		if exists {
+			return next, true
+		}
+	}
+	return nil, false
+}
+
+Chunk_Entity_Iter :: struct {
+	block: ^Entity_Block,
+	index: int,
+}
+
+chunk_entity_iter :: proc(chunk: ^World_Chunk) -> Chunk_Entity_Iter {
+	return {chunk.first_block, 0}
+}
+
+chunk_entity_next :: proc(iter: ^Chunk_Entity_Iter) -> (Entity_ID, bool) {
+	if iter.block == nil {
+		return ENTITY_NIL, false
+	}
+	next := iter.block.entities[iter.index]
+	iter.index += 1
+	if iter.index >= len(iter.block.entities) {
+		iter.block = iter.block.next
+		iter.index = 0
+	}
+	return next, true
+}
+
+World_Entity_XYRegion_Iter :: struct {
+	chunk_iter: World_Chunk_XYRegion_Iter,
+	entity_iter: Chunk_Entity_Iter,
+}
+
+world_entity_xy_iter :: proc(
+	min_chunk, max_chunk: [2]i32,
+	z_chunk: i32,
+) -> World_Entity_XYRegion_Iter {
+	return {chunk_iter = world_chunk_xy_iter(min_chunk, max_chunk, z_chunk)}
+}
+
+world_entity_xy_next :: proc(
+	world: ^World,
+	iter: ^World_Entity_XYRegion_Iter,
+) -> (
+	Entity_ID,
+	bool,
+) {
+	for {
+		if next, ok := chunk_entity_next(&iter.entity_iter); ok {
+			return next, true
+		}
+		chunk, ok := world_chunk_xy_next(world, &iter.chunk_iter)
+		if !ok {
+			return ENTITY_NIL, false
+		}
+		iter.entity_iter = chunk_entity_iter(chunk)
+	}
 }

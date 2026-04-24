@@ -629,8 +629,6 @@ update_player_movement :: proc(
 		collision_padding := player.dim / 2 + 1
 		min_chunk := offset_pos(region_min, -collision_padding).chunk.xy
 		max_chunk := offset_pos(region_max, +collision_padding).chunk.xy
-		// TODO: Also search in other Z chunks?
-		chunk_z := player.pos.chunk.z
 
 		closest_t: f32 = 1
 		collide_norm: [2]f32
@@ -638,54 +636,40 @@ update_player_movement :: proc(
 
 		checked := 0
 
-		// TODO: Chunk region iterator
-		for chunk_y in min_chunk.y ..= max_chunk.y {
-			for chunk_x in min_chunk.x ..= max_chunk.x {
-				chunk := world_get_chunk(
-					&state.world,
-					{chunk_x, chunk_y, chunk_z},
-				) or_continue
+		// TODO: Also search in other Z chunks?
+		entity_iter := world_entity_xy_iter(
+			min_chunk,
+			max_chunk,
+			player.pos.chunk.z,
+		)
+		for entity_id in world_entity_xy_next(&state.world, &entity_iter) {
+			checked += 1
+			if entity_id == player_id do continue
 
-				for block := chunk.first_block;
-				    block != nil;
-				    block = block.next {
-					for entity_id in block.entities {
-						checked += 1
-						if entity_id == player_id do continue
+			entity :=
+				get_entity(state, entity_id) or_else panic(
+					"invalid entity ID in chunk block",
+				)
 
-						entity :=
-							get_entity(state, entity_id) or_else panic(
-								"invalid entity ID in chunk block",
-							)
-						if entity.pos.local == {6, 8} {
-							// runtime.debug_trap()
-						}
+			if !entity_can_collide(entity.type) do continue
 
-						if !entity_can_collide(entity.type) do continue
+			rel_target_origin := world_pos_sub_xy(entity.pos, player.pos)
+			coll_rect := make_rect_center_dim(
+				rel_target_origin,
+				entity.dim + player.dim,
+			)
 
-						rel_target_origin := world_pos_sub_xy(
-							entity.pos,
-							player.pos,
-						)
-						coll_rect := make_rect_center_dim(
-							rel_target_origin,
-							entity.dim + player.dim,
-						)
-
-						// TODO: Remove parameter and always pass the relative position
-						// of the "target" object?
-						if t, norm, coll := collides_axis_aligned_rect(
-							0,
-							target_dp,
-							coll_rect,
-						); coll && t < closest_t {
-							closest_t = t
-							collide_norm = norm
-							// TODO: Track index instead?
-							collide_entity = entity
-						}
-					}
-				}
+			// TODO: Remove parameter and always pass the relative position
+			// of the "target" object?
+			if t, norm, coll := collides_axis_aligned_rect(
+				0,
+				target_dp,
+				coll_rect,
+			); coll && t < closest_t {
+				closest_t = t
+				collide_norm = norm
+				// TODO: Track index instead?
+				collide_entity = entity
 			}
 		}
 
