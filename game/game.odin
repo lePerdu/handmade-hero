@@ -184,7 +184,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 				type = .Hero,
 				face_dir = .Front,
 				pos = make_world_pos_f32(
-					0, // {VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
+					{VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
 				),
 				dim = PLAYER_COLLISION_SIZE,
 			}
@@ -608,12 +608,11 @@ update_player_movement :: proc(
 		// TODO: Handle or disallow coordinate wrapping
 		// Search for collisions in the rectangle bounding the current and target
 		// positions
-		// TODO: Center player pos/bounding box to avoid asymmetric adjustments
-		COLLISION_PADDING: [2]f32 : 0.05
+		collision_padding := player.dim / 2 + 1
 		min_tile :=
-			world_pos_tile(offset_pos(region_min, {-PLAYER_COLLISION_SIZE.x / 2, 0} - COLLISION_PADDING)).xy
+			world_pos_tile(offset_pos(region_min, -collision_padding)).xy
 		max_tile :=
-			world_pos_tile(offset_pos(region_max, {PLAYER_COLLISION_SIZE.x / 2, PLAYER_COLLISION_SIZE.y} + COLLISION_PADDING)).xy
+			world_pos_tile(offset_pos(region_max, +collision_padding)).xy
 		search_rect := make_rect_min_max(min_tile, max_tile)
 
 		closest_t: f32 = 1
@@ -624,7 +623,6 @@ update_player_movement :: proc(
 			if !entity_can_collide(entity.type) do continue
 			if Entity_ID(index) == entity_id do continue
 			if entity.pos.chunk.z != player.pos.chunk.z do continue
-			if !rect_contains(search_rect, world_pos_tile(entity.pos).xy) do continue
 
 			rel_target_origin := world_pos_sub_xy(entity.pos, player.pos)
 			coll_rect := make_rect_center_dim(
