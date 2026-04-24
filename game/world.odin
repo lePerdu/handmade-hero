@@ -3,13 +3,14 @@ package game
 import "base:intrinsics"
 import "core:math"
 import "core:math/linalg"
+import "core:mem"
 import "core:testing"
 
 Chunk_Pos :: [3]i32
 Local_Pos :: [2]f32
 
 // TODO: Rename to "tiles"?
-CHUNK_SIZE_METERS :: 64
+CHUNK_SIZE_METERS :: 16
 // TODO: Rename?
 LOCAL_MIN :: -CHUNK_SIZE_METERS / 2
 LOCAL_MAX :: CHUNK_SIZE_METERS / 2
@@ -259,6 +260,8 @@ offset_pos :: proc(pos: World_Pos, delta: [2]f32) -> World_Pos {
 
 Entity_Block :: struct {
 	next: ^Entity_Block,
+	// TODO: Don't store length here since every non-head block should always
+	// be full?
 	entities: [dynamic; 16]Entity_ID,
 }
 
@@ -317,7 +320,7 @@ world_get_chunk :: proc(
 world_get_or_alloc_chunk :: proc(
 	world: ^World,
 	chunk_pos: Chunk_Pos,
-	allocator := context.allocator,
+	arena: ^mem.Arena,
 ) -> (
 	chunk: ^World_Chunk,
 	ok: bool,
@@ -332,7 +335,7 @@ world_get_or_alloc_chunk :: proc(
 		chunk := &world.chunk_table[index]
 		if chunk.first_block == nil ||
 		   chunk.first_block == CHUNK_BLOCK_TOMBSTONE {
-			new_block, err := new(Entity_Block, allocator)
+			new_block, err := new(Entity_Block, mem.arena_allocator(arena))
 			if err != nil {
 				return nil, false
 			}
@@ -353,13 +356,15 @@ world_get_or_alloc_chunk :: proc(
 
 world_chunk_alloc_entity :: proc(
 	chunk: ^World_Chunk,
+	arena: ^mem.Arena,
 ) -> (
 	id_ref: ^Entity_ID,
 	ok: bool,
 ) {
 	if chunk.first_block == nil ||
 	   len(chunk.first_block.entities) == cap(chunk.first_block.entities) {
-		if new_block, err := new(Entity_Block); err == nil {
+		if new_block, err := new(Entity_Block, mem.arena_allocator(arena));
+		   err == nil {
 			new_block^ = {
 				next = chunk.first_block,
 			}
@@ -374,4 +379,63 @@ world_chunk_alloc_entity :: proc(
 	} else {
 		panic("expected append to succeed")
 	}
+}
+
+world_chunk_add_entity :: proc(
+	chunk: ^World_Chunk,
+	id: Entity_ID,
+	arena: ^mem.Arena,
+) -> (
+	ok: bool,
+) {
+	id_ref := world_chunk_alloc_entity(chunk, arena) or_return
+	id_ref^ = id
+	return true
+}
+
+world_chunk_remove_entity :: proc(
+	chunk: ^World_Chunk,
+	id: Entity_ID,
+	arena: ^mem.Arena,
+) -> (
+	ok: bool,
+) {
+	for block := chunk.first_block; block != nil; block = block.next {
+		for test_id, index in block.entities {
+			if test_id == id {
+				block.entities[index] =
+					chunk.first_block.entities[len(chunk.first_block.entities) - 1]
+				pop(&chunk.first_block.entities)
+				if len(chunk.first_block.entities) == 0 {
+					old_block := chunk.first_block
+					chunk.first_block = chunk.first_block.next
+					// TODO: How to properly "free" blocks?
+					free(old_block, mem.arena_allocator(arena))
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+world_update_entity_chunk :: proc(
+	world: ^World,
+	id: Entity_ID,
+	old_chunk_pos, new_chunk_pos: Chunk_Pos,
+	arena: ^mem.Arena,
+) -> (
+	ok: bool,
+) {
+	if old_chunk_pos == new_chunk_pos do return true
+	if old_chunk, exists := world_get_chunk(world, old_chunk_pos); exists {
+		// Doesn't matter if it doesn't exist
+		_ = world_chunk_remove_entity(old_chunk, id, arena)
+	}
+	new_chunk := world_get_or_alloc_chunk(
+		world,
+		new_chunk_pos,
+		arena,
+	) or_return
+	return world_chunk_add_entity(new_chunk, id, arena)
 }

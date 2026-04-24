@@ -179,6 +179,8 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 		assert(nil_entity_id == ENTITY_NIL)
 		assert(nil_entity.type == .None)
 
+		gen_world(state)
+
 		if player_entity, player_id, ok := add_entity(state); ok {
 			player_entity^ = {
 				type = .Hero,
@@ -188,6 +190,14 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 				),
 				dim = PLAYER_COLLISION_SIZE,
 			}
+			// TODO: Separate function name for adding new entity?
+			world_update_entity_chunk(
+				&state.world,
+				player_id,
+				player_entity.pos.chunk,
+				player_entity.pos.chunk,
+				&state.world_arena,
+			)
 			state.controller_to_player_entity[KEYBOARD_FULL_INDEX] = player_id
 			state.camera_follow_entity_index = player_id
 		} else {
@@ -208,7 +218,6 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 			"assets/early_data/test/test_hero_shadow.bmp",
 		)
 
-		gen_world(state)
 		state.initialized = true
 	}
 	return state
@@ -275,7 +284,12 @@ gen_world :: proc(state: ^State) {
 					screen_y * VIEW_TILES_HEIGHT + y,
 					screen_z,
 				}
-				chunk, ok := world_get_or_alloc_chunk(&state.world, pos)
+				chunk_pos := make_world_pos(pos).chunk
+				chunk, ok := world_get_or_alloc_chunk(
+					&state.world,
+					chunk_pos,
+					&state.world_arena,
+				)
 				if !ok do break gen_loop
 				tile: Entity_Type
 
@@ -347,9 +361,12 @@ add_wall :: proc(
 	id: Entity_ID,
 	ok: bool,
 ) {
-	chunk_ref := world_chunk_alloc_entity(chunk) or_return
+	chunk_id_ref := world_chunk_alloc_entity(
+		chunk,
+		&state.world_arena,
+	) or_return
 	entity, id = add_entity(state) or_return
-	chunk_ref^ = id
+	chunk_id_ref^ = id
 	entity^ = {
 		type = .Wall,
 		pos = make_world_pos(tile_pos),
@@ -523,11 +540,12 @@ handle_controller_input :: proc(
 
 update_player_movement :: proc(
 	state: ^State,
-	entity_id: Entity_ID,
+	player_id: Entity_ID,
 	dt_sec: f32,
 	controller: api.Controller,
 ) {
-	player := &state.entities[entity_id]
+	player := &state.entities[player_id]
+	orig_chunk := player.pos.chunk
 	// TODO: Support analog sticks
 
 	// Sign of the movement: -1, 0, +1
@@ -609,38 +627,65 @@ update_player_movement :: proc(
 		// Search for collisions in the rectangle bounding the current and target
 		// positions
 		collision_padding := player.dim / 2 + 1
-		min_tile :=
-			world_pos_tile(offset_pos(region_min, -collision_padding)).xy
-		max_tile :=
-			world_pos_tile(offset_pos(region_max, +collision_padding)).xy
-		search_rect := make_rect_min_max(min_tile, max_tile)
+		min_chunk := offset_pos(region_min, -collision_padding).chunk.xy
+		max_chunk := offset_pos(region_max, +collision_padding).chunk.xy
+		// TODO: Also search in other Z chunks?
+		chunk_z := player.pos.chunk.z
 
 		closest_t: f32 = 1
 		collide_norm: [2]f32
 		collide_entity: ^Entity
 
-		for &entity, index in state.entities {
-			if !entity_can_collide(entity.type) do continue
-			if Entity_ID(index) == entity_id do continue
-			if entity.pos.chunk.z != player.pos.chunk.z do continue
+		checked := 0
 
-			rel_target_origin := world_pos_sub_xy(entity.pos, player.pos)
-			coll_rect := make_rect_center_dim(
-				rel_target_origin,
-				entity.dim + player.dim,
-			)
+		// TODO: Chunk region iterator
+		for chunk_y in min_chunk.y ..= max_chunk.y {
+			for chunk_x in min_chunk.x ..= max_chunk.x {
+				chunk := world_get_chunk(
+					&state.world,
+					{chunk_x, chunk_y, chunk_z},
+				) or_continue
 
-			// TODO: Remove parameter and always pass the relative position
-			// of the "target" object?
-			if t, norm, coll := collides_axis_aligned_rect(
-				0,
-				target_dp,
-				coll_rect,
-			); coll && t < closest_t {
-				closest_t = t
-				collide_norm = norm
-				// TODO: Track index instead?
-				collide_entity = &entity
+				for block := chunk.first_block;
+				    block != nil;
+				    block = block.next {
+					for entity_id in block.entities {
+						checked += 1
+						if entity_id == player_id do continue
+
+						entity :=
+							get_entity(state, entity_id) or_else panic(
+								"invalid entity ID in chunk block",
+							)
+						if entity.pos.local == {6, 8} {
+							// runtime.debug_trap()
+						}
+
+						if !entity_can_collide(entity.type) do continue
+
+						rel_target_origin := world_pos_sub_xy(
+							entity.pos,
+							player.pos,
+						)
+						coll_rect := make_rect_center_dim(
+							rel_target_origin,
+							entity.dim + player.dim,
+						)
+
+						// TODO: Remove parameter and always pass the relative position
+						// of the "target" object?
+						if t, norm, coll := collides_axis_aligned_rect(
+							0,
+							target_dp,
+							coll_rect,
+						); coll && t < closest_t {
+							closest_t = t
+							collide_norm = norm
+							// TODO: Track index instead?
+							collide_entity = entity
+						}
+					}
+				}
 			}
 		}
 
@@ -667,6 +712,16 @@ update_player_movement :: proc(
 		if collision_iters > MAX_COLLISION_ITERS {
 			panic("possible infinite collision detection loop")
 		}
+	}
+
+	if !world_update_entity_chunk(
+		&state.world,
+		player_id,
+		orig_chunk,
+		player.pos.chunk,
+		&state.world_arena,
+	) {
+		panic("failed to migrate entity chunk")
 	}
 }
 
