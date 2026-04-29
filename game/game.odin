@@ -191,14 +191,14 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 				),
 				dim = PLAYER_COLLISION_SIZE,
 			}
-			// TODO: Separate function name for adding new entity?
-			world_update_entity_chunk(
+			if ok := world_add_entity(
 				&state.world,
 				player_id,
 				player_entity.pos.chunk,
-				player_entity.pos.chunk,
 				&state.world_arena,
-			)
+			); !ok {
+				panic("failed to add player to world chunk")
+			}
 			state.controller_to_player_entity[KEYBOARD_FULL_INDEX] = player_id
 			state.camera_follow_entity_index = player_id
 		} else {
@@ -1011,10 +1011,27 @@ handmade_game_render :: proc "contextless" (
 		-{WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT} / 2,
 	)
 
-	// Render in reverse order so that the player is on top
-	// TODO: Do actual render ordering
-	#reverse for entity in state.entities {
-		switch entity.type {
+	// Min/max tile to search, found by extending the player's position by
+	// the collision box
+
+	// TODO: Handle or disallow coordinate wrapping
+	// Search for collisions in the rectangle bounding the current and target
+	// positions
+	RENDER_PADDING :: 1
+	min_chunk := offset_pos(window_origin, -RENDER_PADDING).chunk.xy
+	max_chunk :=
+		offset_pos(window_origin, {WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT} + RENDER_PADDING).chunk.xy
+
+	entity_iter := world_entity_xy_iter(
+		min_chunk,
+		max_chunk,
+		state.camera_pos.chunk.z,
+	)
+	for entity_id in world_entity_xy_next(&state.world, &entity_iter) {
+		entity := get_entity(state, entity_id) or_continue
+
+		// #reverse for entity in state.entities {
+		#partial switch entity.type {
 		case .None:
 		case .Wall:
 			assert(pos_is_normalized(entity.pos))

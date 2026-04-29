@@ -419,6 +419,18 @@ world_chunk_remove_entity :: proc(
 	return false
 }
 
+world_add_entity :: proc(
+	world: ^World,
+	id: Entity_ID,
+	chunk_pos: Chunk_Pos,
+	arena: ^mem.Arena,
+) -> (
+	ok: bool,
+) {
+	chunk := world_get_or_alloc_chunk(world, chunk_pos, arena) or_return
+	return world_chunk_add_entity(chunk, id, arena)
+}
+
 world_update_entity_chunk :: proc(
 	world: ^World,
 	id: Entity_ID,
@@ -432,12 +444,7 @@ world_update_entity_chunk :: proc(
 		// Doesn't matter if it doesn't exist
 		_ = world_chunk_remove_entity(old_chunk, id, arena)
 	}
-	new_chunk := world_get_or_alloc_chunk(
-		world,
-		new_chunk_pos,
-		arena,
-	) or_return
-	return world_chunk_add_entity(new_chunk, id, arena)
+	return world_add_entity(world, id, new_chunk_pos, arena)
 }
 
 World_Chunk_XYRegion_Iter :: struct {
