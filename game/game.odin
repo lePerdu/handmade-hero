@@ -32,7 +32,7 @@ State :: struct {
 	entities: [dynamic; MAX_ENTITY_COUNT]Entity,
 }
 
-MAX_ENTITY_COUNT :: 10_000
+MAX_ENTITY_COUNT :: 15_000
 MAX_SIM_ENTITY_COUNT :: 256
 
 Entity_ID :: distinct u32
@@ -240,26 +240,40 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 			panic("failed to add monster entity")
 		}
 
-		if familiar_entity, familiar_id, ok := add_entity(state); ok {
-			familiar_entity^ = {
-				type = .Familiar,
-				face_dir = .Front,
-				pos = make_world_pos_f32(
-					{VIEW_TILES_WIDTH / 5, VIEW_TILES_HEIGHT / 4, 0},
-				),
-				dim = PLAYER_COLLISION_SIZE,
-				following = player_id,
+		add_familiar :: proc(
+			state: ^State,
+			player_id: Entity_ID,
+			pos: [2]f32,
+		) {
+			if familiar_entity, familiar_id, ok := add_entity(state); ok {
+				familiar_entity^ = {
+					type = .Familiar,
+					face_dir = .Front,
+					pos = make_world_pos_f32({pos.x, pos.y, 0}),
+					dim = PLAYER_COLLISION_SIZE,
+					following = player_id,
+				}
+				if ok := world_add_entity(
+					&state.world,
+					familiar_id,
+					familiar_entity.pos.chunk,
+					&state.world_arena,
+				); !ok {
+					panic("failed to add player to familiar chunk")
+				}
+			} else {
+				panic("failed to add familiar entity")
 			}
-			if ok := world_add_entity(
-				&state.world,
-				familiar_id,
-				familiar_entity.pos.chunk,
-				&state.world_arena,
-			); !ok {
-				panic("failed to add player to familiar chunk")
-			}
-		} else {
-			panic("failed to add familiar entity")
+		}
+		for _ in 0 ..< 20 {
+			add_familiar(
+				state,
+				player_id,
+				{
+					rand.float32_range(1, WINDOW_TILES_WIDTH - 1),
+					rand.float32_range(1, WINDOW_TILES_WIDTH - 1),
+				},
+			)
 		}
 
 		state.background_texture = debug_load_bmp(
