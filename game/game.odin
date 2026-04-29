@@ -23,6 +23,7 @@ State :: struct {
 	controller_to_player_entity: [VIRT_CONTROLLER_COUNT]Entity_ID,
 	world_arena: mem.Arena,
 	background_texture: Bmp_Image,
+	tree_texture: Bmp_Image,
 	hero_textures: [Direction]Player_Textures,
 	hero_shadow_texture: Bmp_Image,
 	entities: [dynamic; MAX_ENTITY_COUNT]Entity,
@@ -207,6 +208,10 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 		state.background_texture = debug_load_bmp(
 			memory,
 			"assets/early_data/test/test_background.bmp",
+		)
+		state.tree_texture = debug_load_bmp(
+			memory,
+			"assets/early_data/test2/tree01.bmp",
 		)
 
 		state.hero_textures[.Right] = load_hero_textures(memory, "right")
@@ -995,7 +1000,9 @@ handmade_game_render :: proc "contextless" (
 	// Fill with ugly color so it's obvious when some part isn't covered
 	frame_buffer_fill(fb, make_pixel(0xFF, 0x00, 0xFF))
 
-	render_bmp(fb, 0, 0, state.background_texture)
+	// TODO: Background looks weird with trees as walls...
+	// render_bmp(fb, 0, 0, state.background_texture)
+	frame_buffer_fill(fb, make_pixel(0x40, 0x40, 0x40))
 
 	// state.camera_pos, adjusted so that it points to the bottom-left corner
 	// instead of the center
@@ -1014,10 +1021,17 @@ handmade_game_render :: proc "contextless" (
 			// TODO: Include 0.5 offset in render_rect_tile?
 			render_pos := world_pos_sub_xy(entity.pos, window_origin)
 			// Mark entity's tile
-			render_rect_tile(
+			// render_rect_tile(
+			// 	fb,
+			// 	make_rect_center_dim(render_pos, entity.dim),
+			// 	color = make_color(0.8),
+			// )
+			render_bmp(
 				fb,
-				make_rect_center_dim(render_pos, entity.dim),
-				color = make_color(0.8),
+				(render_pos - 0.5) * TILE_SIZE_PX,
+				// TODO: Extract the alignment somewhere else
+				{21, 0},
+				state.tree_texture,
 			)
 		case .Hero:
 			// if entity.pos.tile.z != state.camera_pos.tile.z do continue
