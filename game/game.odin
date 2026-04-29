@@ -75,7 +75,7 @@ Player_Textures :: struct {
 	head: Bmp_Image,
 	torso: Bmp_Image,
 	cape: Bmp_Image,
-	align_px: [2]i32,
+	align_px: [2]f32,
 }
 
 Direction :: enum {
@@ -304,7 +304,7 @@ load_hero_textures :: proc(
 		head = head,
 		cape = cape,
 		torso = torso,
-		align_px = {i32(torso.width) / 2, 35},
+		align_px = {f32(torso.width) / 2, 35},
 	}
 }
 
@@ -1105,26 +1105,21 @@ handmade_game_render :: proc "contextless" (
 
 	for sim_entity in state.sim_entities {
 		entity := get_entity(state, sim_entity.id) or_continue
+		// TODO: Extra culling for sim entities outside of the window
+
+		render_pos := world_pos_sub_xy(entity.pos, window_origin)
 
 		// #reverse for entity in state.entities {
 		switch entity.type {
 		case .None:
 		case .Wall:
 			assert(pos_is_normalized(entity.pos))
-			// TODO: Include 0.5 offset in render_rect_tile?
 			render_pos := world_pos_sub_xy(entity.pos, window_origin)
-			// Mark entity's tile
-			// render_rect_tile(
-			// 	fb,
-			// 	make_rect_center_dim(render_pos, entity.dim),
-			// 	color = make_color(0.8),
-			// )
-			render_bmp(
+			render_part(
 				fb,
-				(render_pos - 0.5) * TILE_SIZE_PX,
-				// TODO: Extract the alignment somewhere else
-				{21, 0},
+				{render_pos.x, render_pos.y, 0},
 				state.tree_texture,
+				{51, 30},
 			)
 		case .Hero:
 			// if entity.pos.tile.z != state.camera_pos.tile.z do continue
@@ -1132,7 +1127,6 @@ handmade_game_render :: proc "contextless" (
 
 			assert(pos_is_normalized(entity.pos))
 
-			render_pos := world_pos_sub_xy(entity.pos, window_origin)
 			// Mark entity's tile
 			render_rect_tile(
 				fb,
@@ -1153,42 +1147,23 @@ handmade_game_render :: proc "contextless" (
 				color = make_color(0.8, 0.8, 0.0),
 			)
 
-			base_render_pos_px := render_pos * TILE_SIZE_PX
-
 			// Fade shadow when the player jumps
 			shadow_alpha := 1 - min(entity.z / 2.0, 1)
 
-			// TODO: Calc render width/height based on image size? Scale bitmaps to fit
-			// pre-defined dimensions?
-			render_bmp(
+			render_part(
 				fb,
-				base_render_pos_px,
+				{render_pos.x, render_pos.y, 0},
+				state.hero_shadow_texture,
 				// TODO: Is this the proper align position for the shadow in all
 				// directions?
 				hero_tex.align_px,
-				state.hero_shadow_texture,
 				shadow_alpha,
 			)
-			body_render_pos_px := base_render_pos_px
-			body_render_pos_px.y += TILE_SIZE_PX * Z_TO_Y_RATIO * entity.z
-			render_bmp(
-				fb,
-				body_render_pos_px,
-				hero_tex.align_px,
-				hero_tex.torso,
-			)
-			render_bmp(
-				fb,
-				body_render_pos_px,
-				hero_tex.align_px,
-				hero_tex.cape,
-			)
-			render_bmp(
-				fb,
-				body_render_pos_px,
-				hero_tex.align_px,
-				hero_tex.head,
-			)
+
+			body_render_pos: [3]f32 = {render_pos.x, render_pos.y, entity.z}
+			render_part(fb, body_render_pos, hero_tex.torso, hero_tex.align_px)
+			render_part(fb, body_render_pos, hero_tex.cape, hero_tex.align_px)
+			render_part(fb, body_render_pos, hero_tex.head, hero_tex.align_px)
 
 			// Mark entity's position
 			MARKER_SIZE :: 0.1
@@ -1203,31 +1178,17 @@ handmade_game_render :: proc "contextless" (
 
 			assert(pos_is_normalized(entity.pos))
 
-			render_pos := world_pos_sub_xy(entity.pos, window_origin)
-
-			base_render_pos_px := render_pos * TILE_SIZE_PX
-
-			// Fade shadow when the player jumps
-			shadow_alpha := 1 - min(entity.z / 2.0, 1)
-
-			// TODO: Calc render width/height based on image size? Scale bitmaps to fit
-			// pre-defined dimensions?
-			render_bmp(
+			render_part(
 				fb,
-				base_render_pos_px,
-				// TODO: Is this the proper align position for the shadow in all
-				// directions?
-				hero_tex.align_px,
+				{render_pos.x, render_pos.y, 0},
 				state.hero_shadow_texture,
-				shadow_alpha,
-			)
-			body_render_pos_px := base_render_pos_px
-			body_render_pos_px.y += TILE_SIZE_PX * Z_TO_Y_RATIO * entity.z
-			render_bmp(
-				fb,
-				body_render_pos_px,
 				hero_tex.align_px,
+			)
+			render_part(
+				fb,
+				{render_pos.x, render_pos.y, entity.z},
 				hero_tex.torso,
+				hero_tex.align_px,
 			)
 		case .Familiar:
 			// if entity.pos.tile.z != state.camera_pos.tile.z do continue
@@ -1235,18 +1196,33 @@ handmade_game_render :: proc "contextless" (
 
 			assert(pos_is_normalized(entity.pos))
 
-			render_pos := world_pos_sub_xy(entity.pos, window_origin)
-			base_render_pos_px := render_pos * TILE_SIZE_PX
-			body_render_pos_px := base_render_pos_px
-			body_render_pos_px.y += TILE_SIZE_PX * Z_TO_Y_RATIO * entity.z
-			render_bmp(
+			render_part(
 				fb,
-				body_render_pos_px,
+				{render_pos.x, render_pos.y, 0},
+				state.hero_shadow_texture,
 				hero_tex.align_px,
+			)
+			render_part(
+				fb,
+				{render_pos.x, render_pos.y, entity.z},
 				hero_tex.head,
+				hero_tex.align_px,
 			)
 		}
 	}
+}
+
+render_part :: proc(
+	fb: Frame_Buffer,
+	pos: [3]f32,
+	bitmap: Bmp_Image,
+	align_px: [2]f32,
+	alpha: f32 = 1.0,
+) {
+	pos_xy := pos.xy
+	pos_xy.y += Z_TO_Y_RATIO * pos.z
+	pos_px := pos_xy * TILE_SIZE_PX - align_px
+	render_bmp(fb, pos_px, bitmap, alpha)
 }
 
 Color :: [4]f32
@@ -1423,15 +1399,13 @@ render_rect_tile :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
 
 render_bmp :: proc(
 	fb: Frame_Buffer,
-	pos: [2]f32,
-	align: [2]i32,
+	pos_px: [2]f32,
 	img: Bmp_Image,
 	extra_alpha: f32 = 1.0,
 ) {
-	base := pos - linalg.to_f32(align)
 	region := map_px_region(
 		fb,
-		round_int(base),
+		round_int(pos_px),
 		{int(img.width), int(img.height)},
 	)
 
