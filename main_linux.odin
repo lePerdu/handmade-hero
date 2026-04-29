@@ -199,7 +199,7 @@ game_loop :: proc(state: ^State) {
 		return
 	}
 
-	last_update_time_ns: i64 = get_perf_counter_cpu_ns()
+	last_update_time_ns: i64 = get_perf_counter_wall_ns()
 	last_render_time_ns: i64
 
 	if fb, ok := display_get_back_buffer(&state.display); ok {
@@ -231,7 +231,7 @@ game_loop :: proc(state: ^State) {
 		// display/audio events to process
 		next_update_time_ns := last_update_time_ns + MIN_UPDATE_PERIOD_NS
 		max_wait_time_ms := i32(
-			max(next_update_time_ns - get_perf_counter_cpu_ns(), 0) /
+			max(next_update_time_ns - get_perf_counter_wall_ns(), 0) /
 			1_000_000,
 		)
 		if poll_res := posix.poll(
