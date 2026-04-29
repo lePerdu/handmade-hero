@@ -64,6 +64,7 @@ Entity :: struct {
 	face_dir: Direction,
 	dim: [2]f32,
 	following: Entity_ID,
+	bob_phase: f32,
 }
 
 /// Active, simulated entity
@@ -693,6 +694,11 @@ update_entity :: proc(state: ^State, id: Entity_ID, dt_sec: f32) {
 		delta := world_pos_sub_xy(following.pos, entity.pos)
 		move_acc := FAMILIAR_MOVE_ACC * linalg.normalize0(delta)
 		update_entity_motion(state, id, move_acc, FAMILIAR_MAX_SPEED, dt_sec)
+		// Set after moving so that it ignores gravity
+
+		entity.bob_phase += math.TAU / FAMILIAR_BOB_PERIOD * dt_sec
+		entity.bob_phase = math.mod(entity.bob_phase, math.TAU)
+		entity.z = FAMILIAR_BOB_HEIGHT * math.sin(entity.bob_phase)
 	}
 }
 
@@ -930,6 +936,9 @@ GRAVITY_ACC: f32 : 10
 
 FAMILIAR_MAX_SPEED :: PLAYER_MAX_SPEED / 2
 FAMILIAR_MOVE_ACC :: PLAYER_MOVE_ACC
+
+FAMILIAR_BOB_PERIOD :: 1.2
+FAMILIAR_BOB_HEIGHT :: 0.2
 
 WINDOW_TILES_WIDTH :: 16
 WINDOW_TILES_HEIGHT :: 9
