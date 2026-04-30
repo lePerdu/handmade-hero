@@ -63,7 +63,8 @@ Entity :: struct {
 	z: f32,
 	face_dir: Direction,
 	dim: [2]f32,
-	following: Entity_ID,
+	hp_max: i8,
+	hp: i8,
 	bob_phase: f32,
 }
 
@@ -204,6 +205,8 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 					{VIEW_TILES_WIDTH / 3, VIEW_TILES_HEIGHT / 3, 0},
 				),
 				dim = PLAYER_COLLISION_SIZE,
+				hp_max = 3,
+				hp = 3,
 			}
 			if ok := world_add_entity(
 				&state.world,
@@ -227,6 +230,8 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 					{VIEW_TILES_WIDTH * 2 / 3, VIEW_TILES_HEIGHT * 2 / 3, 0},
 				),
 				dim = PLAYER_COLLISION_SIZE,
+				hp_max = 3,
+				hp = 3,
 			}
 			if ok := world_add_entity(
 				&state.world,
@@ -247,7 +252,6 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 					face_dir = .Front,
 					pos = make_world_pos_f32({pos.x, pos.y, 0}),
 					dim = PLAYER_COLLISION_SIZE,
-					following = player_id,
 				}
 				if ok := world_add_entity(
 					&state.world,
@@ -707,7 +711,6 @@ update_entity :: proc(state: ^State, id: Entity_ID, dt_sec: f32) {
 			dt_sec,
 		)
 		// Set after moving so that it ignores gravity
-
 		entity.bob_phase += math.TAU / FAMILIAR_BOB_PERIOD * dt_sec
 		entity.bob_phase = math.mod(entity.bob_phase, math.TAU)
 		entity.z = FAMILIAR_BOB_HEIGHT * math.sin(entity.bob_phase)
@@ -980,6 +983,10 @@ collides_axis_aligned_rect :: proc(
 	return
 }
 
+//
+// CONSTANTS
+//
+
 TILE_SIZE_PX :: 60
 TILE_OFFSET_PX :: [2]f32{-TILE_SIZE_PX / 2, 0}
 Z_TO_Y_RATIO :: 0.75
@@ -1004,6 +1011,10 @@ FAMILIAR_FOLLOW_DIST2 :: FAMILIAR_FOLLOW_DIST * FAMILIAR_FOLLOW_DIST
 
 FAMILIAR_BOB_PERIOD :: 1.2
 FAMILIAR_BOB_HEIGHT :: 0.2
+
+HP_SIZE :: 0.15
+HP_OFFSET_Y :: 0.3
+HP_SPACING_X :: HP_SIZE * 2
 
 WINDOW_TILES_WIDTH :: 16
 WINDOW_TILES_HEIGHT :: 9
@@ -1202,24 +1213,24 @@ handmade_game_render :: proc "contextless" (
 			assert(pos_is_normalized(entity.pos))
 
 			// Mark entity's tile
-			render_rect_tile(
-				fb,
-				make_rect_center_dim(
-					world_pos_sub_xy(
-						world_pos_round(entity.pos),
-						window_origin,
-					),
-					1,
-				),
-				color = make_color(1.0),
-			)
+			// render_rect(
+			// 	fb,
+			// 	make_rect_center_dim(
+			// 		world_pos_sub_xy(
+			// 			world_pos_round(entity.pos),
+			// 			window_origin,
+			// 		),
+			// 		1,
+			// 	),
+			// 	color = make_color(1.0),
+			// )
 
 			// Mark collision box
-			render_rect_tile(
-				fb,
-				make_rect_center_dim(render_pos, entity.dim),
-				color = make_color(0.8, 0.8, 0.0),
-			)
+			// render_rect(
+			// 	fb,
+			// 	make_rect_center_dim(render_pos, entity.dim),
+			// 	color = make_color(0.8, 0.8, 0.0),
+			// )
 
 			// Fade shadow when the player jumps
 			shadow_alpha := 1 - min(entity.z / 2.0, 1)
@@ -1239,13 +1250,15 @@ handmade_game_render :: proc "contextless" (
 			render_part(fb, body_render_pos, hero_tex.cape, hero_tex.align_px)
 			render_part(fb, body_render_pos, hero_tex.head, hero_tex.align_px)
 
-			// Mark entity's position
-			MARKER_SIZE :: 0.1
-			render_rect_tile(
-				fb,
-				make_rect_center_dim(render_pos, MARKER_SIZE),
-				color = make_color(0.8, 0.0, 0.0),
-			)
+			render_hp(fb, entity, render_pos)
+
+		// Mark entity's position
+		// MARKER_SIZE :: 0.1
+		// render_rect(
+		// 	fb,
+		// 	make_rect_center_dim(render_pos, MARKER_SIZE),
+		// 	color = make_color(0.8, 0.0, 0.0),
+		// )
 		case .Monster:
 			// if entity.pos.tile.z != state.camera_pos.tile.z do continue
 			hero_tex := state.hero_textures[entity.face_dir]
@@ -1264,17 +1277,21 @@ handmade_game_render :: proc "contextless" (
 				hero_tex.torso,
 				hero_tex.align_px,
 			)
+			render_hp(fb, entity, render_pos)
 		case .Familiar:
 			// if entity.pos.tile.z != state.camera_pos.tile.z do continue
 			hero_tex := state.hero_textures[entity.face_dir]
 
 			assert(pos_is_normalized(entity.pos))
 
+			shadow_alpha := 0.5 - min(entity.z / 2.0, 0.5)
+
 			render_part(
 				fb,
 				{render_pos.x, render_pos.y, 0},
 				state.hero_shadow_texture,
 				hero_tex.align_px,
+				shadow_alpha,
 			)
 			render_part(
 				fb,
@@ -1283,6 +1300,31 @@ handmade_game_render :: proc "contextless" (
 				hero_tex.align_px,
 			)
 		}
+	}
+}
+
+render_hp :: proc(fb: Frame_Buffer, entity: ^Entity, render_pos: [2]f32) {
+	if entity.hp_max <= 0 do return
+
+	render_pos := render_pos
+	render_pos.y -= HP_OFFSET_Y
+
+	base_offset_x := -f32(entity.hp_max - 1) / 2 * HP_SPACING_X
+	for i in 0 ..< entity.hp_max {
+		color: Color
+		if i < entity.hp {
+			color = make_color(0.9, 0.0, 0.0)
+		} else {
+			color = make_color(0.2, 0.2, 0.2)
+		}
+		render_rect(
+			fb,
+			make_rect_center_dim(
+				render_pos + {base_offset_x + f32(i) * HP_SPACING_X, 0},
+				HP_SIZE,
+			),
+			color,
+		)
 	}
 }
 
@@ -1455,7 +1497,7 @@ round_px_region :: proc(pos, size: [2]f32) -> (pos_px, size_px: [2]int) {
 	return min_px, max_px - min_px
 }
 
-render_rect :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
+render_rect_px :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
 	pixel := make_pixel(color)
 	pos_px, size_px := round_px_region(rect_min(rect), rect_dim(rect))
 	region := map_px_region(fb, pos_px, size_px)
@@ -1467,8 +1509,8 @@ render_rect :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
 	}
 }
 
-render_rect_tile :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
-	render_rect(fb, rect_scale(rect, TILE_SIZE_PX), color = color)
+render_rect :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
+	render_rect_px(fb, rect_scale(rect, TILE_SIZE_PX), color = color)
 }
 
 render_bmp :: proc(
