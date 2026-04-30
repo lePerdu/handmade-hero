@@ -28,7 +28,7 @@ State :: struct {
 	// Entities in a region near the camera that are being simulated, checked
 	// for collisions, and rendered
 	// TODO: Store sim region in temp memory?
-	sim_entities: [dynamic; MAX_SIM_ENTITY_COUNT]Sim_Entity,
+	sim_entities: [dynamic]Sim_Entity,
 	entities: [dynamic; MAX_ENTITY_COUNT]Entity,
 }
 
@@ -544,6 +544,7 @@ handmade_game_update :: proc "contextless" (
 	}
 
 	{
+		state.sim_entities.allocator = context.temp_allocator
 		clear(&state.sim_entities)
 
 		// TODO: Make a square?
