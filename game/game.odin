@@ -240,11 +240,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 			panic("failed to add monster entity")
 		}
 
-		add_familiar :: proc(
-			state: ^State,
-			player_id: Entity_ID,
-			pos: [2]f32,
-		) {
+		add_familiar :: proc(state: ^State, pos: [2]f32) {
 			if familiar_entity, familiar_id, ok := add_entity(state); ok {
 				familiar_entity^ = {
 					type = .Familiar,
@@ -265,16 +261,13 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 				panic("failed to add familiar entity")
 			}
 		}
-		for _ in 0 ..< 20 {
-			add_familiar(
-				state,
-				player_id,
-				{
-					rand.float32_range(1, WINDOW_TILES_WIDTH - 1),
-					rand.float32_range(1, WINDOW_TILES_WIDTH - 1),
-				},
-			)
-		}
+		add_familiar(
+			state,
+			{
+				rand.float32_range(1, WINDOW_TILES_WIDTH - 1),
+				rand.float32_range(1, WINDOW_TILES_WIDTH - 1),
+			},
+		)
 
 		state.background_texture = debug_load_bmp(
 			memory,
@@ -705,16 +698,71 @@ update_entity :: proc(state: ^State, id: Entity_ID, dt_sec: f32) {
 	entity, _ := get_entity(state, id)
 	#partial switch (entity.type) {
 	case .Familiar:
-		following := get_entity(state, entity.following) or_break
-		delta := world_pos_sub_xy(following.pos, entity.pos)
-		move_acc := FAMILIAR_MOVE_ACC * linalg.normalize0(delta)
-		update_entity_motion(state, id, move_acc, FAMILIAR_MAX_SPEED, dt_sec)
+		update_following_motion(
+			state,
+			id,
+			FAMILIAR_MOVE_ACC,
+			FAMILIAR_MAX_SPEED,
+			FAMILIAR_FOLLOW_DIST2,
+			dt_sec,
+		)
 		// Set after moving so that it ignores gravity
 
 		entity.bob_phase += math.TAU / FAMILIAR_BOB_PERIOD * dt_sec
 		entity.bob_phase = math.mod(entity.bob_phase, math.TAU)
 		entity.z = FAMILIAR_BOB_HEIGHT * math.sin(entity.bob_phase)
+	case .Monster:
+		update_following_motion(
+			state,
+			id,
+			FAMILIAR_MOVE_ACC,
+			FAMILIAR_MAX_SPEED,
+			FAMILIAR_FOLLOW_DIST2,
+			dt_sec,
+		)
 	}
+}
+
+update_following_motion :: proc(
+	state: ^State,
+	id: Entity_ID,
+	move_acc: f32,
+	max_speed: f32,
+	follow_dist2: f32,
+	dt_sec: f32,
+) {
+	entity, exists := get_entity(state, id)
+	if !exists do return
+
+	// Search for nearest hero to follow
+	closest_dist2: f32 = math.INF_F32
+	follow_target: ^Entity
+	for sim_entity in state.sim_entities {
+		test_entity := get_entity(state, sim_entity.id) or_continue
+		if test_entity.type == .Hero {
+			dist2 := world_pos_dist2(entity.pos, test_entity.pos)
+			if dist2 < closest_dist2 {
+				closest_dist2 = dist2
+				follow_target = test_entity
+			}
+		}
+	}
+
+	acc_vec: [2]f32
+	if follow_target != nil && closest_dist2 > follow_dist2 {
+		delta := world_pos_sub_xy(follow_target.pos, entity.pos)
+		if delta == 0 {
+			// Leave face_dir as-is
+		} else if abs(delta.x) >= abs(delta.y) {
+			// Prefer x accel if
+			entity.face_dir = delta.x > 0 ? .Right : .Left
+		} else {
+			entity.face_dir = delta.y > 0 ? .Back : .Front
+		}
+
+		acc_vec = move_acc * linalg.normalize0(delta)
+	}
+	update_entity_motion(state, id, acc_vec, max_speed, dt_sec)
 }
 
 update_entity_motion :: proc(
@@ -951,6 +999,8 @@ GRAVITY_ACC: f32 : 10
 
 FAMILIAR_MAX_SPEED :: PLAYER_MAX_SPEED / 2
 FAMILIAR_MOVE_ACC :: PLAYER_MOVE_ACC
+FAMILIAR_FOLLOW_DIST :: 2
+FAMILIAR_FOLLOW_DIST2 :: FAMILIAR_FOLLOW_DIST * FAMILIAR_FOLLOW_DIST
 
 FAMILIAR_BOB_PERIOD :: 1.2
 FAMILIAR_BOB_HEIGHT :: 0.2
