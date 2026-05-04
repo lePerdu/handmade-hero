@@ -25,10 +25,13 @@ State :: struct {
 	tree_texture: Bmp_Image,
 	hero_textures: [Direction]Player_Textures,
 	hero_shadow_texture: Bmp_Image,
+	hero_attack_texture: Bmp_Image,
 	// Entities in a region near the camera that are being simulated, checked
 	// for collisions, and rendered
 	// TODO: Store sim region in temp memory?
 	sim_entities: [dynamic]Sim_Entity,
+	// TODO: Use a hash table for look ups?
+	hit_table: [dynamic; MAX_HIT_COUNT]Tracked_Hit,
 	entities: [dynamic; MAX_ENTITY_COUNT]Entity,
 }
 
@@ -44,6 +47,7 @@ Entity_Type :: enum {
 	Wall,
 	Monster,
 	Familiar,
+	Sword,
 }
 
 entity_can_collide :: proc(t: Entity_Type) -> bool {
@@ -65,12 +69,19 @@ Entity :: struct {
 	dim: [2]f32,
 	hp_max: i8,
 	hp: i8,
-	bob_phase: f32,
+	anim_t: f32,
+	weapon: Entity_ID,
 }
 
 /// Active, simulated entity
 Sim_Entity :: struct {
 	id: Entity_ID,
+}
+
+MAX_HIT_COUNT :: 64
+
+Tracked_Hit :: struct {
+	self, target: Entity_ID,
 }
 
 Player_Textures :: struct {
@@ -188,6 +199,28 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 		mem.arena_init(&state.world_arena, memory.persistent[size_of(State):])
 		state.camera_pos = {}
 
+		state.background_texture = debug_load_bmp(
+			memory,
+			"assets/early_data/test/test_background.bmp",
+		)
+		state.tree_texture = debug_load_bmp(
+			memory,
+			"assets/early_data/test2/tree01.bmp",
+		)
+
+		state.hero_textures[.Right] = load_hero_textures(memory, "right")
+		state.hero_textures[.Back] = load_hero_textures(memory, "back")
+		state.hero_textures[.Left] = load_hero_textures(memory, "left")
+		state.hero_textures[.Front] = load_hero_textures(memory, "front")
+		state.hero_shadow_texture = debug_load_bmp(
+			memory,
+			"assets/early_data/test/test_hero_shadow.bmp",
+		)
+		state.hero_attack_texture = debug_load_bmp(
+			memory,
+			"assets/early_data/test2/rock03.bmp",
+		)
+
 		// TODO: Why is this necessary?
 		nil_entity, nil_entity_id :=
 			add_entity(state) or_else panic("failed to create nil entity")
@@ -196,8 +229,9 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 
 		gen_world(state)
 
-		player_entity, player_id, ok := add_entity(state)
-		if ok {
+		player: ^Entity
+		if player_entity, player_id, ok := add_entity(state); ok {
+			player = player_entity
 			player_entity^ = {
 				type = .Hero,
 				face_dir = .Front,
@@ -220,6 +254,24 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 			state.camera_follow_entity_index = player_id
 		} else {
 			panic("failed to add player entity")
+		}
+
+		if sword_entity, sword_id, ok := add_entity(state); ok {
+			dim :=
+				[2]f32 {
+					f32(state.hero_attack_texture.width),
+					f32(state.hero_attack_texture.height),
+				} /
+				TILE_SIZE_PX
+			sword_entity^ = {
+				type = .Sword,
+				// TODO: More concrete way to make a hidden/disabled entity?
+				pos = WORLD_POS_INVALID,
+				dim = dim,
+			}
+			player.weapon = sword_id
+		} else {
+			panic("failed to add sword entity")
 		}
 
 		if monster_entity, monster_id, ok := add_entity(state); ok {
@@ -271,24 +323,6 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 				rand.float32_range(1, WINDOW_TILES_WIDTH - 1),
 				rand.float32_range(1, WINDOW_TILES_WIDTH - 1),
 			},
-		)
-
-		state.background_texture = debug_load_bmp(
-			memory,
-			"assets/early_data/test/test_background.bmp",
-		)
-		state.tree_texture = debug_load_bmp(
-			memory,
-			"assets/early_data/test2/tree01.bmp",
-		)
-
-		state.hero_textures[.Right] = load_hero_textures(memory, "right")
-		state.hero_textures[.Back] = load_hero_textures(memory, "back")
-		state.hero_textures[.Left] = load_hero_textures(memory, "left")
-		state.hero_textures[.Front] = load_hero_textures(memory, "front")
-		state.hero_shadow_texture = debug_load_bmp(
-			memory,
-			"assets/early_data/test/test_hero_shadow.bmp",
 		)
 
 		state.initialized = true
@@ -519,6 +553,7 @@ handmade_game_update :: proc "contextless" (
 ) {
 	context = get_game_context(memory)
 	state := get_game_state(memory)
+	free_all(context.temp_allocator)
 
 	if camera_follow_target, ok := get_entity(
 		state,
@@ -667,7 +702,7 @@ handle_player_input :: proc(
 		player_move_dir.x += 1
 	}
 
-	if api.button_input_pressed(controller.buttons[.Action_Up]) {
+	if api.button_input_pressed(controller.buttons[.Start]) {
 		if player.z == 0 {
 			player.vel.z = PLAYER_JUMP_VEL
 		}
@@ -684,17 +719,58 @@ handle_player_input :: proc(
 		player.face_dir = player_move_dir.y > 0 ? .Back : .Front
 	}
 
-	max_speed := PLAYER_MAX_SPEED
-	if controller.buttons[.Action_Right].end_pressed {
-		max_speed *= 3
-	}
-	if controller.buttons[.Action_Left].end_pressed {
-		max_speed /= 3
-	}
+	// max_speed := PLAYER_MAX_SPEED
+	// if controller.buttons[.Action_Right].end_pressed {
+	// 	max_speed *= 3
+	// }
+	// if controller.buttons[.Action_Left].end_pressed {
+	// 	max_speed /= 3
+	// }
 
 	player_move_acc := PLAYER_MOVE_ACC * linalg.normalize0(player_move_dir)
 
-	update_entity_motion(state, entity_id, player_move_acc, max_speed, dt_sec)
+	update_entity_motion(
+		state,
+		entity_id,
+		player_move_acc,
+		PLAYER_MAX_SPEED,
+		dt_sec,
+	)
+
+	if sword, ok := get_entity(state, player.weapon); ok {
+		if !world_pos_is_valid(sword.pos) {
+			sword_dir: [2]f32
+
+			if controller.buttons[.Action_Up].end_pressed {
+				sword_dir.y = 1
+			} else if controller.buttons[.Action_Left].end_pressed {
+				sword_dir.x = -1
+			} else if controller.buttons[.Action_Down].end_pressed {
+				sword_dir.y = -1
+			} else if controller.buttons[.Action_Right].end_pressed {
+				sword_dir.x = 1
+			}
+
+			PLAYER_SWORD_SPACING :: 1
+
+			if sword_dir != 0 {
+				// TODO: Spacing needs to change based on direction
+				sword.pos = offset_pos(
+					player.pos,
+					PLAYER_SWORD_SPACING * sword_dir,
+				)
+				sword.vel.xy = SWORD_SPEED * sword_dir
+				sword.z = 0
+				world_add_entity(
+					&state.world,
+					player.weapon,
+					sword.pos.chunk,
+					&state.world_arena,
+				)
+				sword.anim_t = 0
+			}
+		}
+	}
 }
 
 update_entity :: proc(state: ^State, id: Entity_ID, dt_sec: f32) {
@@ -711,9 +787,9 @@ update_entity :: proc(state: ^State, id: Entity_ID, dt_sec: f32) {
 			dt_sec,
 		)
 		// Set after moving so that it ignores gravity
-		entity.bob_phase += math.TAU / FAMILIAR_BOB_PERIOD * dt_sec
-		entity.bob_phase = math.mod(entity.bob_phase, math.TAU)
-		entity.z = FAMILIAR_BOB_HEIGHT * math.sin(entity.bob_phase)
+		entity.anim_t += math.TAU / FAMILIAR_BOB_PERIOD * dt_sec
+		entity.anim_t = math.mod(entity.anim_t, math.TAU)
+		entity.z = FAMILIAR_BOB_HEIGHT * math.sin(entity.anim_t)
 	case .Monster:
 		update_following_motion(
 			state,
@@ -723,6 +799,31 @@ update_entity :: proc(state: ^State, id: Entity_ID, dt_sec: f32) {
 			FAMILIAR_FOLLOW_DIST2,
 			dt_sec,
 		)
+	case .Sword:
+		if !world_pos_is_valid(entity.pos) {
+			break
+		}
+		sword_dt_sec: f32
+		if entity.anim_t + dt_sec < SWORD_LIVE_TIME {
+			sword_dt_sec = dt_sec
+		} else {
+			sword_dt_sec = SWORD_LIVE_TIME - entity.anim_t
+		}
+		// Always take the full time, so the check later can remove the entity
+		entity.anim_t += dt_sec
+
+		entity.pos = offset_pos(entity.pos, sword_dt_sec * entity.vel.xy)
+		// TODO: Check for collisions
+
+		if entity.anim_t >= SWORD_LIVE_TIME {
+			world_remove_entity(
+				&state.world,
+				id,
+				entity.pos.chunk,
+				&state.world_arena,
+			)
+			entity.pos = WORLD_POS_INVALID
+		}
 	}
 }
 
@@ -1004,6 +1105,9 @@ PLAYER_COLLIDE_COEF: f32 : 0
 PLAYER_JUMP_VEL :: 4
 GRAVITY_ACC: f32 : 10
 
+SWORD_SPEED :: PLAYER_MAX_SPEED * 2
+SWORD_LIVE_TIME :: 0.5
+
 FAMILIAR_MAX_SPEED :: PLAYER_MAX_SPEED / 2
 FAMILIAR_MOVE_ACC :: PLAYER_MOVE_ACC
 FAMILIAR_FOLLOW_DIST :: 2
@@ -1192,14 +1296,13 @@ handmade_game_render :: proc "contextless" (
 		entity := get_entity(state, sim_entity.id) or_continue
 		// TODO: Extra culling for sim entities outside of the window
 
+		assert(pos_is_normalized(entity.pos))
 		render_pos := world_pos_sub_xy(entity.pos, window_origin)
 
 		// #reverse for entity in state.entities {
 		switch entity.type {
 		case .None:
 		case .Wall:
-			assert(pos_is_normalized(entity.pos))
-			render_pos := world_pos_sub_xy(entity.pos, window_origin)
 			render_part(
 				fb,
 				{render_pos.x, render_pos.y, 0},
@@ -1209,8 +1312,6 @@ handmade_game_render :: proc "contextless" (
 		case .Hero:
 			// if entity.pos.tile.z != state.camera_pos.tile.z do continue
 			hero_tex := state.hero_textures[entity.face_dir]
-
-			assert(pos_is_normalized(entity.pos))
 
 			// Mark entity's tile
 			// render_rect(
@@ -1263,8 +1364,6 @@ handmade_game_render :: proc "contextless" (
 			// if entity.pos.tile.z != state.camera_pos.tile.z do continue
 			hero_tex := state.hero_textures[entity.face_dir]
 
-			assert(pos_is_normalized(entity.pos))
-
 			render_part(
 				fb,
 				{render_pos.x, render_pos.y, 0},
@@ -1282,8 +1381,6 @@ handmade_game_render :: proc "contextless" (
 			// if entity.pos.tile.z != state.camera_pos.tile.z do continue
 			hero_tex := state.hero_textures[entity.face_dir]
 
-			assert(pos_is_normalized(entity.pos))
-
 			shadow_alpha := 0.5 - min(entity.z / 2.0, 0.5)
 
 			render_part(
@@ -1298,6 +1395,19 @@ handmade_game_render :: proc "contextless" (
 				{render_pos.x, render_pos.y, entity.z},
 				hero_tex.head,
 				hero_tex.align_px,
+			)
+		case .Sword:
+			align_px :=
+				[2]f32 {
+					f32(state.hero_attack_texture.width),
+					f32(state.hero_attack_texture.height),
+				} /
+				2
+			render_part(
+				fb,
+				{render_pos.x, render_pos.y, 0},
+				state.hero_attack_texture,
+				align_px,
 			)
 		}
 	}

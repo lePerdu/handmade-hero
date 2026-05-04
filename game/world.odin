@@ -23,6 +23,14 @@ World_Pos :: struct {
 	local: Local_Pos,
 }
 
+WORLD_POS_INVALID :: World_Pos {
+	chunk = max(i32),
+}
+
+world_pos_is_valid :: proc(pos: World_Pos) -> bool {
+	return pos.chunk != WORLD_POS_INVALID.chunk
+}
+
 make_world_pos_i32 :: proc(tile_pos: [3]i32) -> World_Pos {
 	// TODO: Pre-normalize incoming integer to avoid rounding errors
 	// NOTE: tile_pos.z is not handled correctly.
@@ -431,6 +439,18 @@ world_add_entity :: proc(
 	return world_chunk_add_entity(chunk, id, arena)
 }
 
+world_remove_entity :: proc(
+	world: ^World,
+	id: Entity_ID,
+	chunk_pos: Chunk_Pos,
+	arena: ^mem.Arena,
+) {
+	if old_chunk, exists := world_get_chunk(world, chunk_pos); exists {
+		// Doesn't matter if it doesn't exist
+		_ = world_chunk_remove_entity(old_chunk, id, arena)
+	}
+}
+
 world_update_entity_chunk :: proc(
 	world: ^World,
 	id: Entity_ID,
@@ -440,10 +460,7 @@ world_update_entity_chunk :: proc(
 	ok: bool,
 ) {
 	if old_chunk_pos == new_chunk_pos do return true
-	if old_chunk, exists := world_get_chunk(world, old_chunk_pos); exists {
-		// Doesn't matter if it doesn't exist
-		_ = world_chunk_remove_entity(old_chunk, id, arena)
-	}
+	world_remove_entity(world, id, old_chunk_pos, arena)
 	return world_add_entity(world, id, new_chunk_pos, arena)
 }
 
