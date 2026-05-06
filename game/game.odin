@@ -52,7 +52,7 @@ Entity_Type :: enum {
 
 entity_can_collide :: proc(t: Entity_Type) -> bool {
 	#partial switch t {
-	case .Hero, .Monster, .Familiar, .Wall:
+	case .Hero, .Monster, .Wall:
 		return true
 	case:
 		return false
@@ -733,8 +733,12 @@ handle_player_input :: proc(
 		state,
 		entity_id,
 		player_move_acc,
-		PLAYER_MAX_SPEED,
 		dt_sec,
+		Motion_Spec {
+			max_speed = PLAYER_MAX_SPEED,
+			friction_coef = PLAYER_FRICTION,
+			gravity_acc = GRAVITY_ACC,
+		},
 	)
 
 	if sword, ok := get_entity(state, player.weapon); ok {
@@ -812,7 +816,13 @@ update_entity :: proc(state: ^State, id: Entity_ID, dt_sec: f32) {
 		// Always take the full time, so the check later can remove the entity
 		entity.anim_t += dt_sec
 
-		entity.pos = offset_pos(entity.pos, sword_dt_sec * entity.vel.xy)
+		// Collision check skipped in here since sword is marked as non-colliding
+		SWORD_MOTION :: Motion_Spec {
+			max_speed = SWORD_SPEED,
+			friction_coef = 0,
+			gravity_acc = 0,
+		}
+		update_entity_motion(state, id, 0, sword_dt_sec, SWORD_MOTION)
 		// TODO: Check for collisions
 
 		if entity.anim_t >= SWORD_LIVE_TIME {
@@ -866,15 +876,32 @@ update_following_motion :: proc(
 
 		acc_vec = move_acc * linalg.normalize0(delta)
 	}
-	update_entity_motion(state, id, acc_vec, max_speed, dt_sec)
+
+	update_entity_motion(
+		state,
+		id,
+		acc_vec,
+		dt_sec,
+		Motion_Spec {
+			max_speed = max_speed,
+			friction_coef = PLAYER_FRICTION,
+			gravity_acc = GRAVITY_ACC,
+		},
+	)
+}
+
+Motion_Spec :: struct {
+	max_speed: f32,
+	friction_coef: f32,
+	gravity_acc: f32,
 }
 
 update_entity_motion :: proc(
 	state: ^State,
 	id: Entity_ID,
 	acc: [2]f32,
-	max_speed: f32,
 	dt_sec: f32,
+	motion_spec: Motion_Spec,
 ) {
 	entity := &state.entities[id]
 	orig_chunk := entity.pos.chunk
@@ -884,85 +911,57 @@ update_entity_motion :: proc(
 	if entity.vel.xy != 0 {
 		// v' = v - F*v/|v| = v * (1 - F/|v|)
 		friction_scale := min(
-			PLAYER_FRICTION * dt_sec / linalg.length(entity.vel.xy),
+			motion_spec.friction_coef * dt_sec / linalg.length(entity.vel.xy),
 			1,
 		)
 		entity.vel.xy *= 1 - friction_scale
 	}
 	entity.vel.xy += dt_sec * acc
-	entity.vel.xy = linalg.clamp_length(entity.vel.xy, max_speed)
+	entity.vel.xy = linalg.clamp_length(entity.vel.xy, motion_spec.max_speed)
 
 	if entity.z > 0 {
-		entity.vel.z -= GRAVITY_ACC * dt_sec
+		entity.vel.z -= motion_spec.gravity_acc * dt_sec
 	} else if entity.vel.z < 0 {
 		// Not really necessary, but reset this for consistency
 		entity.vel.z = 0
 	}
 	entity.z = max(entity.z + entity.vel.z * dt_sec, 0)
 
-	remaining_dt_sec := dt_sec
+	if entity_can_collide(entity.type) {
+		remaining_dt_sec := dt_sec
 
-	collision_iters := 0
-	for remaining_dt_sec > 0 {
-		target_dp := entity.vel.xy * remaining_dt_sec
+		collision_iters := 0
+		for remaining_dt_sec > 0 {
+			closest_t, collide_norm, collide_entity_id :=
+				find_nearest_collision(state, id, remaining_dt_sec)
+			_ = collide_entity_id
 
-		closest_t: f32 = 1
-		collide_norm: [2]f32
-		collide_entity: ^Entity
+			step_dt_sec: f32
+			if closest_t < 1 {
+				// TODO: Use distance-based epsilon so it's velocity-independent
+				T_EPSILON :: 0.0001
+				step_dt_sec = max(remaining_dt_sec * closest_t - T_EPSILON, 0)
+			} else {
+				step_dt_sec = remaining_dt_sec
+			}
+			remaining_dt_sec -= step_dt_sec
 
-		for test_sim in state.sim_entities {
-			if test_sim.id == id do continue
+			step_dp := entity.vel.xy * step_dt_sec
+			entity.pos = offset_pos(entity.pos, step_dp)
+			// No-op if collide_norm == 0
+			entity.vel.xy -=
+				(1 + PLAYER_COLLIDE_COEF) *
+				linalg.dot(collide_norm, entity.vel.xy) *
+				collide_norm
 
-			test_entity :=
-				get_entity(state, test_sim.id) or_else panic(
-					"invalid entity ID in chunk block",
-				)
-
-			if !entity_can_collide(test_entity.type) do continue
-
-			rel_target_origin := world_pos_sub_xy(test_entity.pos, entity.pos)
-			coll_rect := make_rect_center_dim(
-				rel_target_origin,
-				test_entity.dim + entity.dim,
-			)
-
-			// TODO: Remove parameter and always pass the relative position
-			// of the "target" object?
-			if t, norm, coll := collides_axis_aligned_rect(
-				0,
-				target_dp,
-				coll_rect,
-			); coll && t < closest_t {
-				closest_t = t
-				collide_norm = norm
-				// TODO: Track index instead?
-				collide_entity = test_entity
+			MAX_COLLISION_ITERS :: 10
+			collision_iters += 1
+			if collision_iters > MAX_COLLISION_ITERS {
+				panic("possible infinite collision detection loop")
 			}
 		}
-
-		step_dt_sec: f32
-		if closest_t < 1 {
-			// TODO: Use distance-based epsilon so it's velocity-independent
-			T_EPSILON :: 0.0001
-			step_dt_sec = max(remaining_dt_sec * closest_t - T_EPSILON, 0)
-		} else {
-			step_dt_sec = remaining_dt_sec
-		}
-		remaining_dt_sec -= step_dt_sec
-
-		step_dp := entity.vel.xy * step_dt_sec
-		entity.pos = offset_pos(entity.pos, step_dp)
-		// No-op if collide_norm == 0
-		entity.vel.xy -=
-			(1 + PLAYER_COLLIDE_COEF) *
-			linalg.dot(collide_norm, entity.vel.xy) *
-			collide_norm
-
-		MAX_COLLISION_ITERS :: 10
-		collision_iters += 1
-		if collision_iters > MAX_COLLISION_ITERS {
-			panic("possible infinite collision detection loop")
-		}
+	} else {
+		entity.pos = offset_pos(entity.pos, dt_sec * entity.vel.xy)
 	}
 
 	if !world_update_entity_chunk(
@@ -974,6 +973,51 @@ update_entity_motion :: proc(
 	) {
 		panic("failed to migrate entity chunk")
 	}
+}
+
+find_nearest_collision :: proc(
+	state: ^State,
+	id: Entity_ID,
+	dt_sec: f32,
+) -> (
+	closest_t: f32 = 1,
+	collide_norm: [2]f32,
+	collide_entity: Entity_ID,
+) {
+	entity, exists := get_entity(state, id)
+	assert(exists)
+
+	target_dp := entity.vel.xy * dt_sec
+
+	for test_sim in state.sim_entities {
+		if test_sim.id == id do continue
+
+		test_entity :=
+			get_entity(state, test_sim.id) or_else panic(
+				"invalid entity ID in chunk block",
+			)
+
+		if !entity_can_collide(test_entity.type) do continue
+
+		rel_target_origin := world_pos_sub_xy(test_entity.pos, entity.pos)
+		coll_rect := make_rect_center_dim(
+			rel_target_origin,
+			test_entity.dim + entity.dim,
+		)
+
+		// TODO: Remove parameter and always pass the relative position
+		// of the "target" object?
+		if t, norm, coll := collides_axis_aligned_rect(
+			0,
+			target_dp,
+			coll_rect,
+		); coll && t < closest_t {
+			closest_t = t
+			collide_norm = norm
+			collide_entity = test_sim.id
+		}
+	}
+	return
 }
 
 Axis :: enum {
