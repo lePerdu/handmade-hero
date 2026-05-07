@@ -12,6 +12,7 @@ import "core:slice"
 import "api"
 
 Frame_Buffer :: api.Frame_Buffer
+Image :: Frame_Buffer
 
 State :: struct {
 	// Relies on game memory being 0-initialized
@@ -21,11 +22,11 @@ State :: struct {
 	camera_follow_entity_index: Entity_ID,
 	controller_to_player_entity: [VIRT_CONTROLLER_COUNT]Entity_ID,
 	world_arena: mem.Arena,
-	background_texture: Bmp_Image,
-	tree_texture: Bmp_Image,
+	background_texture: Image,
+	tree_texture: Image,
 	hero_textures: [Direction]Player_Textures,
-	hero_shadow_texture: Bmp_Image,
-	hero_attack_texture: Bmp_Image,
+	hero_shadow_texture: Image,
+	hero_attack_texture: Image,
 	// Entities in a region near the camera that are being simulated, checked
 	// for collisions, and rendered
 	// TODO: Store sim region in temp memory?
@@ -85,9 +86,9 @@ Tracked_Hit :: struct {
 }
 
 Player_Textures :: struct {
-	head: Bmp_Image,
-	torso: Bmp_Image,
-	cape: Bmp_Image,
+	head: Image,
+	torso: Image,
+	cape: Image,
 	align_px: [2]f32,
 }
 
@@ -180,10 +181,11 @@ get_game_context :: proc "contextless" (
 	return context
 }
 
-debug_load_bmp :: proc(memory: api.Memory, file_path: string) -> Bmp_Image {
-	contents := memory.debug.read_file(memory.debug.data, file_path)
+debug_load_bmp :: proc(memory: api.Memory, file_path: string) -> Image {
+	contents := api.debug_read_file(memory, file_path)
+	defer api.debug_free_file(memory, contents)
 
-	background: Bmp_Image
+	background: Image
 	if img, ok := load_bmp(contents); ok {
 		return img
 	} else {
@@ -199,6 +201,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 		mem.arena_init(&state.world_arena, memory.persistent[size_of(State):])
 		state.camera_pos = {}
 
+		context.allocator = mem.arena_allocator(&state.world_arena)
 		state.background_texture = debug_load_bmp(
 			memory,
 			"assets/early_data/test/test_background.bmp",
@@ -1171,138 +1174,6 @@ WINDOW_TILES_HEIGHT :: 9
 VIEW_TILES_WIDTH :: 17
 VIEW_TILES_HEIGHT :: 9
 
-Bmp_Header :: struct #packed {
-	id: [2]u8,
-	size: u32le,
-	_reserved1: u16le,
-	_reserved2: u16le,
-	bitmap_offset: u32le,
-}
-#assert(size_of(Bmp_Header) == 14)
-
-Dib_Bitmap_Info_Header :: struct #packed {
-	// Should be >= 40
-	header_size: u32le,
-	bitmap_width: i32le,
-	// Positive: bottom->top
-	// Negative: top->bottom
-	bitmap_height: i32le,
-	color_planes: u16le,
-	bits_per_pixel: u16le,
-	compression: Compression_Method,
-	// 0 for RGB
-	image_size: u32le,
-	horiz_resolution: u32le,
-	vert_resolution: u32le,
-	colors: u32le,
-	important_colors: u32le,
-	// v4
-	// RGBA
-	masks: [4]u32le,
-	cs_type: u32le,
-	endpoints: [3][3]u32le,
-	gamma: [3][2]u16le,
-	// v5
-	intent: u32le,
-	profile_data: u32le,
-	profile_size: u32le,
-	_reserved: u32le,
-}
-
-Compression_Method :: enum u32le {
-	Rgb             = 0,
-	Rle8            = 1,
-	Rle4            = 2,
-	Bitfields       = 3,
-	Jpeg            = 4,
-	Png             = 5,
-	Alpha_Bitfields = 6,
-	Cmyk            = 11,
-	Cmyk_Rle8       = 12,
-	Cmyk_Rle4       = 13,
-}
-
-// TODO: Use same structure for dest frame buffer?
-Bmp_Image :: struct {
-	width: u32,
-	height: u32,
-	stride: u32,
-	format: Bmp_Format,
-	pixels: rawptr,
-}
-
-Bmp_Format :: enum {
-	Rgba8le,
-	Argb8le,
-	// TODO: Separate formats for non-alpha channel? Just assume alpha is 255 in
-	// those cases?
-}
-
-Bmp_Pixel_Rgba8le :: struct #packed {
-	a, b, g, r: u8,
-}
-BMP_RGBA8LE_MASK :: [4]u32le{0xFF000000, 0x00FF0000, 0x0000FF00, 0x000000FF}
-
-Bmp_Pixel_Argb8le :: struct #packed {
-	b, g, r, a: u8,
-}
-BMP_ARGB8LE_MASK :: [4]u32le{0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000}
-
-load_bmp :: proc(contents: []byte) -> (image: Bmp_Image, ok: bool) {
-	if len(contents) < size_of(Bmp_Header) {
-		ok = false
-		return
-	}
-
-	// TODO: Replace asserts with error returns
-	bmp_header := (^Bmp_Header)(&contents[0])
-	assert(bmp_header.id == "BM")
-	assert(bmp_header.bitmap_offset <= bmp_header.size)
-
-	info_header := (^Dib_Bitmap_Info_Header)(&contents[size_of(bmp_header^)])
-	assert(info_header.header_size >= size_of(info_header^))
-	assert(info_header.color_planes == 1)
-	assert(info_header.bits_per_pixel == 32)
-	assert(info_header.colors == 0)
-
-	// Round up to nearest 32-bit chunk
-	stride_bytes :=
-		((u32(info_header.bits_per_pixel) * u32(info_header.bitmap_width) +
-				31) &
-			~u32(31)) >>
-		3
-	assert(
-		u32(info_header.image_size) ==
-		stride_bytes * u32(abs(info_header.bitmap_height)),
-	)
-
-	// TODO: Support more dynamic formats
-	#partial switch info_header.compression {
-	case .Bitfields:
-		if info_header.masks.rgb == BMP_RGBA8LE_MASK.rgb {
-			image.format = .Rgba8le
-		} else if info_header.masks.rgb == BMP_ARGB8LE_MASK.rgb {
-			image.format = .Argb8le
-		} else {
-			panic("unsupported bitfields format")
-		}
-	// case .Alpha_Bitfields:
-	// 	assert(info_header.masks == BMP_RGBA8LE_MASK)
-	case:
-		panic("unsupported BMP format")
-	}
-
-	assert(info_header.bitmap_width >= 0)
-	// TODO: support flipped order
-	assert(info_header.bitmap_height >= 0)
-	image.width = u32(info_header.bitmap_width)
-	image.height = u32(info_header.bitmap_height)
-	image.stride = stride_bytes / 4
-	image.pixels = &contents[bmp_header.bitmap_offset]
-	ok = true
-	return
-}
-
 @(export)
 handmade_game_render :: proc "contextless" (
 	memory: api.Memory,
@@ -1485,7 +1356,7 @@ render_hp :: proc(fb: Frame_Buffer, entity: ^Entity, render_pos: [2]f32) {
 render_part :: proc(
 	fb: Frame_Buffer,
 	pos: [3]f32,
-	bitmap: Bmp_Image,
+	bitmap: Image,
 	align_px: [2]f32,
 	alpha: f32 = 1.0,
 ) {
@@ -1670,7 +1541,7 @@ render_rect :: proc(fb: Frame_Buffer, rect: Rect(f32), color: Color) {
 render_bmp :: proc(
 	fb: Frame_Buffer,
 	pos_px: [2]f32,
-	img: Bmp_Image,
+	img: Image,
 	extra_alpha: f32 = 1.0,
 ) {
 	region := map_px_region(
@@ -1684,17 +1555,7 @@ render_bmp :: proc(
 		fb_row := frame_buffer_row(fb, region.out_offset.y - y)
 		for x in 0 ..< region.size.x {
 			img_x := region.in_offset.x + x
-			px_index := img_y * int(img.stride) + img_x
-			src_color: Color_U8
-			// TODO: Convert pixel order to a standard one when loading?
-			switch img.format {
-			case .Rgba8le:
-				bmp_px := ([^]Bmp_Pixel_Rgba8le)(img.pixels)[px_index]
-				src_color = Color_U8{bmp_px.r, bmp_px.g, bmp_px.b, bmp_px.a}
-			case .Argb8le:
-				bmp_px := ([^]Bmp_Pixel_Argb8le)(img.pixels)[px_index]
-				src_color = Color_U8{bmp_px.r, bmp_px.g, bmp_px.b, bmp_px.a}
-			}
+			src_px := frame_buffer_get(img, img_x, img_y)
 
 			fb_col := region.out_offset.x + x
 			px := &fb_row[fb_col]
@@ -1703,13 +1564,13 @@ render_bmp :: proc(
 			// TODO: Report bug? Or is this just expected in debug mode?
 			// alpha_blend_u8_into(px, src_color)
 			{
-				alpha := u32(extra_alpha * f32(src_color.a))
+				alpha := u32(extra_alpha * f32(src_px.a))
 				// TODO: Extracting these adds ~4ms per frame
 				// src_alpha := 1 + alpha
 				// dst_alpha := 256 - alpha
-				r := u32(px.r) * (256 - alpha) + u32(src_color.r) * (1 + alpha)
-				g := u32(px.g) * (256 - alpha) + u32(src_color.g) * (1 + alpha)
-				b := u32(px.b) * (256 - alpha) + u32(src_color.b) * (1 + alpha)
+				r := u32(px.r) * (256 - alpha) + u32(src_px.r) * (1 + alpha)
+				g := u32(px.g) * (256 - alpha) + u32(src_px.g) * (1 + alpha)
+				b := u32(px.b) * (256 - alpha) + u32(src_px.b) * (1 + alpha)
 				px^ = {
 					r = u8(r >> 8),
 					g = u8(g >> 8),

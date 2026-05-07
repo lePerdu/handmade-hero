@@ -18,6 +18,14 @@ Memory :: struct {
 	},
 }
 
+debug_read_file :: proc(memory: Memory, filename: string) -> []byte {
+	return memory.debug.read_file(memory.debug.data, filename)
+}
+
+debug_free_file :: proc(memory: Memory, contents: []byte) {
+	memory.debug.free_file(memory.debug.data, contents)
+}
+
 // TODO: Can these use the odin calling convention even when coming from a
 // shared library?
 Update_Proc :: #type proc "contextless" (memory: Memory, input: Input)

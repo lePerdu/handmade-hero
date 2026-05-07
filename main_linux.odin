@@ -57,7 +57,7 @@ Recording :: struct {
 	frames: [dynamic]game_api.Input,
 }
 
-GAME_MEMORY_SIZE :: 4 << 20
+GAME_MEMORY_SIZE :: 10 << 20
 GAME_TEMP_MEMORY_SIZE :: 1 << 30
 // Fixed address, so that it's possible to save/restore game state across
 // processes
