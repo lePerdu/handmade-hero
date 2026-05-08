@@ -20,6 +20,7 @@ State :: struct {
 	world: World,
 	camera_pos: World_Pos,
 	camera_follow_entity_index: Entity_ID,
+	camera_sim_region: Sim_Region,
 	controller_to_player_entity: [VIRT_CONTROLLER_COUNT]Entity_ID,
 	world_arena: mem.Arena,
 	background_texture: Image,
@@ -27,13 +28,9 @@ State :: struct {
 	hero_textures: [Direction]Player_Textures,
 	hero_shadow_texture: Image,
 	hero_attack_texture: Image,
-	// Entities in a region near the camera that are being simulated, checked
-	// for collisions, and rendered
-	// TODO: Store sim region in temp memory?
-	sim_entities: [dynamic]Sim_Entity,
 	// TODO: Use a hash table for look ups?
 	hit_table: [dynamic; MAX_HIT_COUNT]Tracked_Hit,
-	entities: [dynamic; MAX_ENTITY_COUNT]Entity,
+	entities: [dynamic; MAX_ENTITY_COUNT]Stored_Entity,
 }
 
 MAX_ENTITY_COUNT :: 15_000
@@ -60,23 +57,12 @@ entity_can_collide :: proc(t: Entity_Type) -> bool {
 	}
 }
 
-Entity :: struct {
-	type: Entity_Type,
+Stored_Entity :: struct {
+	using common: Entity_Common,
+	// Global position for persistent storage
 	pos: World_Pos,
-	vel: [3]f32,
-	// TODO: Integrate this into `pos`
+	// TODO: Integrate this into `global_pos`
 	z: f32,
-	face_dir: Direction,
-	dim: [2]f32,
-	hp_max: i8,
-	hp: i8,
-	anim_t: f32,
-	weapon: Entity_ID,
-}
-
-/// Active, simulated entity
-Sim_Entity :: struct {
-	id: Entity_ID,
 }
 
 MAX_HIT_COUNT :: 64
@@ -232,7 +218,7 @@ get_game_state :: proc(memory: api.Memory) -> ^State {
 
 		gen_world(state)
 
-		player: ^Entity
+		player: ^Stored_Entity
 		if player_entity, player_id, ok := add_entity(state); ok {
 			player = player_entity
 			player_entity^ = {
@@ -467,7 +453,7 @@ add_wall :: proc(
 	chunk: ^World_Chunk,
 	tile_pos: [3]i32,
 ) -> (
-	entity: ^Entity,
+	entity: ^Stored_Entity,
 	id: Entity_ID,
 	ok: bool,
 ) {
@@ -578,46 +564,23 @@ handmade_game_update :: proc "contextless" (
 		}
 	}
 
-	{
-		state.sim_entities.allocator = context.temp_allocator
-		clear(&state.sim_entities)
+	CAMERA_SIM_DIM :: [2]f32{WINDOW_TILES_WIDTH * 3, WINDOW_TILES_HEIGHT * 3}
 
-		// TODO: Make a square?
-		SIM_DIM :: [2]f32{WINDOW_TILES_WIDTH * 3, WINDOW_TILES_HEIGHT * 3}
-
-		sim_origin := state.camera_pos
-		// For checking positions relative to sim_origin
-		sim_rect := make_rect_center_dim([2]f32{}, SIM_DIM)
-
-		// Min/max tile to search, found by extending the player's position by
-		// the collision box
-
-		// TODO: Handle or disallow coordinate wrapping
-		// Search for collisions in the rectangle bounding the current and target
-		// positions
-		min_chunk := offset_pos(sim_origin, -SIM_DIM / 2).chunk.xy
-		max_chunk := offset_pos(sim_origin, SIM_DIM / 2).chunk.xy
-
-		entity_iter := world_entity_xy_iter(
-			min_chunk,
-			max_chunk,
-			sim_origin.chunk.z,
-		)
-		for entity_id in world_entity_xy_next(&state.world, &entity_iter) {
-			entity := get_entity(state, entity_id) or_continue
-			rel_pos := world_pos_sub_xy(entity.pos, sim_origin)
-			if rect_contains(sim_rect, rel_pos) {
-				n := append(&state.sim_entities, Sim_Entity{id = entity_id})
-				assert(n != 0)
-			}
-		}
-	}
+	// Reset in case update() is called multiple times before render()
+	sim_region_end(state, &state.camera_sim_region)
+	state.camera_sim_region = sim_region_begin(
+		state,
+		state.camera_pos,
+		CAMERA_SIM_DIM,
+	)
+	// sim_region_end() called after render
 
 	dt_sec := f32(input.dt_ns) * 1e-9
 
 	// For now, just support 1 keyboard
 	handle_player_input(
 		state,
+		state.camera_sim_region,
 		dt_sec,
 		KEYBOARD_FULL_INDEX,
 		keyboard_controller_full(input.keyboard),
@@ -638,15 +601,15 @@ handmade_game_update :: proc "contextless" (
 	// 	keyboard_controller_right(input.keyboard),
 	// )
 
-	for sim in state.sim_entities {
-		update_entity(state, sim.id, dt_sec)
+	for &sim in state.camera_sim_region.entities {
+		update_entity(state, state.camera_sim_region, &sim, dt_sec)
 	}
 }
 
 add_entity :: proc(
 	state: ^State,
 ) -> (
-	entity: ^Entity,
+	entity: ^Stored_Entity,
 	id: Entity_ID,
 	ok: bool,
 ) {
@@ -666,7 +629,7 @@ get_entity :: proc(
 	state: ^State,
 	id: Entity_ID,
 ) -> (
-	entity: ^Entity,
+	entity: ^Stored_Entity,
 	ok: bool,
 ) {
 	entity = slice.get_ptr(state.entities[:], int(id)) or_return
@@ -676,16 +639,17 @@ get_entity :: proc(
 
 handle_player_input :: proc(
 	state: ^State,
+	sim_region: Sim_Region,
 	dt_sec: f32,
 	controller_index: int,
 	controller: api.Controller,
 ) {
-	entity_id := state.controller_to_player_entity[controller_index]
-	if entity_id == ENTITY_NIL {
-		return
-	}
+	player_id := state.controller_to_player_entity[controller_index]
+	if player_id == ENTITY_NIL do return
 
-	player := &state.entities[entity_id]
+	player, in_sim := sim_region_get_by_id(sim_region, player_id)
+	// TODO: Allow player being outside the sim region?
+	assert(in_sim)
 
 	// TODO: Support analog sticks
 
@@ -706,7 +670,7 @@ handle_player_input :: proc(
 	}
 
 	if api.button_input_pressed(controller.buttons[.Start]) {
-		if player.z == 0 {
+		if player.local_pos.z == 0 {
 			player.vel.z = PLAYER_JUMP_VEL
 		}
 	}
@@ -733,8 +697,8 @@ handle_player_input :: proc(
 	player_move_acc := PLAYER_MOVE_ACC * linalg.normalize0(player_move_dir)
 
 	update_entity_motion(
-		state,
-		entity_id,
+		sim_region,
+		player,
 		player_move_acc,
 		dt_sec,
 		Motion_Spec {
@@ -744,7 +708,7 @@ handle_player_input :: proc(
 		},
 	)
 
-	if sword, ok := get_entity(state, player.weapon); ok {
+	if sword, exists := get_entity(state, player.weapon); exists {
 		if !world_pos_is_valid(sword.pos) {
 			sword_dir: [2]f32
 
@@ -763,8 +727,8 @@ handle_player_input :: proc(
 			if sword_dir != 0 {
 				// TODO: Spacing needs to change based on direction
 				sword.pos = offset_pos(
-					player.pos,
-					PLAYER_SWORD_SPACING * sword_dir,
+					sim_region.origin,
+					player.local_pos.xy + PLAYER_SWORD_SPACING * sword_dir,
 				)
 				sword.vel.xy = SWORD_SPEED * sword_dir
 				sword.z = 0
@@ -780,14 +744,18 @@ handle_player_input :: proc(
 	}
 }
 
-update_entity :: proc(state: ^State, id: Entity_ID, dt_sec: f32) {
+update_entity :: proc(
+	state: ^State,
+	sim_region: Sim_Region,
+	entity: ^Sim_Entity,
+	dt_sec: f32,
+) {
 	// Missing handled by type switch
-	entity, _ := get_entity(state, id)
 	#partial switch (entity.type) {
 	case .Familiar:
 		update_following_motion(
-			state,
-			id,
+			sim_region,
+			entity,
 			FAMILIAR_MOVE_ACC,
 			FAMILIAR_MAX_SPEED,
 			FAMILIAR_FOLLOW_DIST2,
@@ -796,20 +764,17 @@ update_entity :: proc(state: ^State, id: Entity_ID, dt_sec: f32) {
 		// Set after moving so that it ignores gravity
 		entity.anim_t += math.TAU / FAMILIAR_BOB_PERIOD * dt_sec
 		entity.anim_t = math.mod(entity.anim_t, math.TAU)
-		entity.z = FAMILIAR_BOB_HEIGHT * math.sin(entity.anim_t)
+		entity.local_pos.z = FAMILIAR_BOB_HEIGHT * math.sin(entity.anim_t)
 	case .Monster:
 		update_following_motion(
-			state,
-			id,
+			sim_region,
+			entity,
 			FAMILIAR_MOVE_ACC,
 			FAMILIAR_MAX_SPEED,
 			FAMILIAR_FOLLOW_DIST2,
 			dt_sec,
 		)
 	case .Sword:
-		if !world_pos_is_valid(entity.pos) {
-			break
-		}
 		sword_dt_sec: f32
 		if entity.anim_t + dt_sec < SWORD_LIVE_TIME {
 			sword_dt_sec = dt_sec
@@ -825,49 +790,39 @@ update_entity :: proc(state: ^State, id: Entity_ID, dt_sec: f32) {
 			friction_coef = 0,
 			gravity_acc = 0,
 		}
-		update_entity_motion(state, id, 0, sword_dt_sec, SWORD_MOTION)
+		update_entity_motion(sim_region, entity, 0, sword_dt_sec, SWORD_MOTION)
 		// TODO: Check for collisions
 
 		if entity.anim_t >= SWORD_LIVE_TIME {
-			world_remove_entity(
-				&state.world,
-				id,
-				entity.pos.chunk,
-				&state.world_arena,
-			)
-			entity.pos = WORLD_POS_INVALID
+			entity.remove = true
 		}
 	}
 }
 
 update_following_motion :: proc(
-	state: ^State,
-	id: Entity_ID,
+	sim_region: Sim_Region,
+	entity: ^Sim_Entity,
 	move_acc: f32,
 	max_speed: f32,
 	follow_dist2: f32,
 	dt_sec: f32,
 ) {
-	entity, exists := get_entity(state, id)
-	if !exists do return
-
 	// Search for nearest hero to follow
 	closest_dist2: f32 = math.INF_F32
-	follow_target: ^Entity
-	for sim_entity in state.sim_entities {
-		test_entity := get_entity(state, sim_entity.id) or_continue
+	follow_target: ^Sim_Entity
+	for &test_entity in sim_region.entities {
 		if test_entity.type == .Hero {
-			dist2 := world_pos_dist2(entity.pos, test_entity.pos)
+			dist2 := linalg.length2(entity.local_pos - test_entity.local_pos)
 			if dist2 < closest_dist2 {
 				closest_dist2 = dist2
-				follow_target = test_entity
+				follow_target = &test_entity
 			}
 		}
 	}
 
 	acc_vec: [2]f32
 	if follow_target != nil && closest_dist2 > follow_dist2 {
-		delta := world_pos_sub_xy(follow_target.pos, entity.pos)
+		delta := follow_target.local_pos.xy - entity.local_pos.xy
 		if delta == 0 {
 			// Leave face_dir as-is
 		} else if abs(delta.x) >= abs(delta.y) {
@@ -881,8 +836,8 @@ update_following_motion :: proc(
 	}
 
 	update_entity_motion(
-		state,
-		id,
+		sim_region,
+		entity,
 		acc_vec,
 		dt_sec,
 		Motion_Spec {
@@ -900,15 +855,12 @@ Motion_Spec :: struct {
 }
 
 update_entity_motion :: proc(
-	state: ^State,
-	id: Entity_ID,
+	sim_region: Sim_Region,
+	entity: ^Sim_Entity,
 	acc: [2]f32,
 	dt_sec: f32,
 	motion_spec: Motion_Spec,
 ) {
-	entity := &state.entities[id]
-	orig_chunk := entity.pos.chunk
-
 	// TODO: Make gravity + friction configurable
 
 	if entity.vel.xy != 0 {
@@ -922,13 +874,13 @@ update_entity_motion :: proc(
 	entity.vel.xy += dt_sec * acc
 	entity.vel.xy = linalg.clamp_length(entity.vel.xy, motion_spec.max_speed)
 
-	if entity.z > 0 {
+	if entity.local_pos.z > 0 {
 		entity.vel.z -= motion_spec.gravity_acc * dt_sec
 	} else if entity.vel.z < 0 {
 		// Not really necessary, but reset this for consistency
 		entity.vel.z = 0
 	}
-	entity.z = max(entity.z + entity.vel.z * dt_sec, 0)
+	entity.local_pos.z = max(entity.local_pos.z + entity.vel.z * dt_sec, 0)
 
 	if entity_can_collide(entity.type) {
 		remaining_dt_sec := dt_sec
@@ -936,7 +888,7 @@ update_entity_motion :: proc(
 		collision_iters := 0
 		for remaining_dt_sec > 0 {
 			closest_t, collide_norm, collide_entity_id :=
-				find_nearest_collision(state, id, remaining_dt_sec)
+				find_nearest_collision(sim_region, entity, remaining_dt_sec)
 			_ = collide_entity_id
 
 			step_dt_sec: f32
@@ -950,7 +902,7 @@ update_entity_motion :: proc(
 			remaining_dt_sec -= step_dt_sec
 
 			step_dp := entity.vel.xy * step_dt_sec
-			entity.pos = offset_pos(entity.pos, step_dp)
+			entity.local_pos.xy += step_dp
 			// No-op if collide_norm == 0
 			entity.vel.xy -=
 				(1 + PLAYER_COLLIDE_COEF) *
@@ -964,48 +916,30 @@ update_entity_motion :: proc(
 			}
 		}
 	} else {
-		entity.pos = offset_pos(entity.pos, dt_sec * entity.vel.xy)
-	}
-
-	if !world_update_entity_chunk(
-		&state.world,
-		id,
-		orig_chunk,
-		entity.pos.chunk,
-		&state.world_arena,
-	) {
-		panic("failed to migrate entity chunk")
+		entity.local_pos.xy += dt_sec * entity.vel.xy
 	}
 }
 
 find_nearest_collision :: proc(
-	state: ^State,
-	id: Entity_ID,
+	sim_region: Sim_Region,
+	entity: ^Sim_Entity,
 	dt_sec: f32,
 ) -> (
 	closest_t: f32 = 1,
 	collide_norm: [2]f32,
-	collide_entity: Entity_ID,
+	collide_entity: ^Sim_Entity,
 ) {
-	entity, exists := get_entity(state, id)
-	assert(exists)
-
 	target_dp := entity.vel.xy * dt_sec
 
-	for test_sim in state.sim_entities {
-		if test_sim.id == id do continue
+	for &test_sim in sim_region.entities {
+		if &test_sim == entity do continue
 
-		test_entity :=
-			get_entity(state, test_sim.id) or_else panic(
-				"invalid entity ID in chunk block",
-			)
+		if !entity_can_collide(test_sim.type) do continue
 
-		if !entity_can_collide(test_entity.type) do continue
-
-		rel_target_origin := world_pos_sub_xy(test_entity.pos, entity.pos)
+		rel_target_origin := (test_sim.local_pos - entity.local_pos).xy
 		coll_rect := make_rect_center_dim(
 			rel_target_origin,
-			test_entity.dim + entity.dim,
+			test_sim.dim + entity.dim,
 		)
 
 		// TODO: Remove parameter and always pass the relative position
@@ -1017,7 +951,7 @@ find_nearest_collision :: proc(
 		); coll && t < closest_t {
 			closest_t = t
 			collide_norm = norm
-			collide_entity = test_sim.id
+			collide_entity = &test_sim
 		}
 	}
 	return
@@ -1182,6 +1116,8 @@ handmade_game_render :: proc "contextless" (
 	context = get_game_context(memory)
 	state := get_game_state(memory)
 
+	defer sim_region_end(state, &state.camera_sim_region)
+
 	// Fill borders
 	frame_buffer_fill(fb, make_pixel(0, 0, 0))
 	// TODO: Scale up rendering instead of just rendering to the center of the
@@ -1200,19 +1136,13 @@ handmade_game_render :: proc "contextless" (
 	// render_bmp(fb, 0, 0, state.background_texture)
 	frame_buffer_fill(fb, make_pixel(0x40, 0x40, 0x40))
 
-	// state.camera_pos, adjusted so that it points to the bottom-left corner
-	// instead of the center
-	window_origin := offset_pos(
-		state.camera_pos,
-		-{WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT} / 2,
-	)
+	// Bottom-left corner of the window, relative to the camera sim region
+	rel_window_origin: [2]f32 = -{WINDOW_TILES_WIDTH, WINDOW_TILES_HEIGHT} / 2
 
-	for sim_entity in state.sim_entities {
-		entity := get_entity(state, sim_entity.id) or_continue
-		// TODO: Extra culling for sim entities outside of the window
+	for entity in state.camera_sim_region.entities {
+		// TODO: Extra culling for sim entities outside of the window?
 
-		assert(pos_is_normalized(entity.pos))
-		render_pos := world_pos_sub_xy(entity.pos, window_origin)
+		render_pos := entity.local_pos.xy - rel_window_origin
 
 		// #reverse for entity in state.entities {
 		switch entity.type {
@@ -1249,7 +1179,7 @@ handmade_game_render :: proc "contextless" (
 			// )
 
 			// Fade shadow when the player jumps
-			shadow_alpha := 1 - min(entity.z / 2.0, 1)
+			shadow_alpha := 1 - min(entity.local_pos.z / 2.0, 1)
 
 			render_part(
 				fb,
@@ -1261,7 +1191,11 @@ handmade_game_render :: proc "contextless" (
 				shadow_alpha,
 			)
 
-			body_render_pos: [3]f32 = {render_pos.x, render_pos.y, entity.z}
+			body_render_pos: [3]f32 = {
+				render_pos.x,
+				render_pos.y,
+				entity.local_pos.z,
+			}
 			render_part(fb, body_render_pos, hero_tex.torso, hero_tex.align_px)
 			render_part(fb, body_render_pos, hero_tex.cape, hero_tex.align_px)
 			render_part(fb, body_render_pos, hero_tex.head, hero_tex.align_px)
@@ -1287,7 +1221,7 @@ handmade_game_render :: proc "contextless" (
 			)
 			render_part(
 				fb,
-				{render_pos.x, render_pos.y, entity.z},
+				{render_pos.x, render_pos.y, entity.local_pos.z},
 				hero_tex.torso,
 				hero_tex.align_px,
 			)
@@ -1296,7 +1230,7 @@ handmade_game_render :: proc "contextless" (
 			// if entity.pos.tile.z != state.camera_pos.tile.z do continue
 			hero_tex := state.hero_textures[entity.face_dir]
 
-			shadow_alpha := 0.5 - min(entity.z / 2.0, 0.5)
+			shadow_alpha := 0.5 - min(entity.local_pos.z / 2.0, 0.5)
 
 			render_part(
 				fb,
@@ -1307,7 +1241,7 @@ handmade_game_render :: proc "contextless" (
 			)
 			render_part(
 				fb,
-				{render_pos.x, render_pos.y, entity.z},
+				{render_pos.x, render_pos.y, entity.local_pos.z},
 				hero_tex.head,
 				hero_tex.align_px,
 			)
@@ -1328,7 +1262,7 @@ handmade_game_render :: proc "contextless" (
 	}
 }
 
-render_hp :: proc(fb: Frame_Buffer, entity: ^Entity, render_pos: [2]f32) {
+render_hp :: proc(fb: Frame_Buffer, entity: Sim_Entity, render_pos: [2]f32) {
 	if entity.hp_max <= 0 do return
 
 	render_pos := render_pos

@@ -461,7 +461,11 @@ world_update_entity_chunk :: proc(
 ) {
 	if old_chunk_pos == new_chunk_pos do return true
 	world_remove_entity(world, id, old_chunk_pos, arena)
-	return world_add_entity(world, id, new_chunk_pos, arena)
+	if new_chunk_pos != WORLD_POS_INVALID.chunk {
+		return world_add_entity(world, id, new_chunk_pos, arena)
+	} else {
+		return true
+	}
 }
 
 World_Chunk_XYRegion_Iter :: struct {
