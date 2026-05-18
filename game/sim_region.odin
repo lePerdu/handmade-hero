@@ -10,7 +10,12 @@ Entity_Common :: struct {
 	hp_max: i8,
 	hp: i8,
 	anim_t: f32,
+	flags: bit_set[Entity_Flags],
 	weapon: Entity_ID,
+}
+
+Entity_Flags :: enum {
+	Collides,
 }
 
 Sim_Region :: struct {

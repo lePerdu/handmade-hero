@@ -48,15 +48,6 @@ Entity_Type :: enum {
 	Sword,
 }
 
-entity_can_collide :: proc(t: Entity_Type) -> bool {
-	#partial switch t {
-	case .Hero, .Monster, .Wall:
-		return true
-	case:
-		return false
-	}
-}
-
 Stored_Entity :: struct {
 	using common: Entity_Common,
 	// Global position for persistent storage
@@ -882,7 +873,7 @@ update_entity_motion :: proc(
 	}
 	entity.local_pos.z = max(entity.local_pos.z + entity.vel.z * dt_sec, 0)
 
-	if entity_can_collide(entity.type) {
+	if .Collides in entity.flags {
 		remaining_dt_sec := dt_sec
 
 		collision_iters := 0
@@ -934,7 +925,7 @@ find_nearest_collision :: proc(
 	for &test_sim in sim_region.entities {
 		if &test_sim == entity do continue
 
-		if !entity_can_collide(test_sim.type) do continue
+		if .Collides not_in test_sim.flags do continue
 
 		rel_target_origin := (test_sim.local_pos - entity.local_pos).xy
 		coll_rect := make_rect_center_dim(
