@@ -39,7 +39,6 @@ State :: struct {
 	xdg_toplevel: wayland.Xdg_Toplevel,
 	xdg_configure_serial: Maybe(u32),
 	surface_state: Surface_State,
-	close_requested: bool,
 	buffers: [BUFFER_COUNT]Display_Buffer,
 	// Index of the buffer which should be used to render the next frame
 	back_buffer_index: int,
@@ -51,8 +50,6 @@ State :: struct {
 
 	// Keyboard
 	wl_keyboard: wayland.Wl_Keyboard,
-	// Keys that are only used for the engine, not passed to the game code
-	engine_keyboard_input: [platform.Engine_Key]game_api.Button_Input,
 
 	// Pointer
 	wl_pointer: wayland.Wl_Pointer,

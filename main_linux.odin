@@ -16,7 +16,8 @@ import "core:time"
 
 import game_api "game/api"
 import "platform"
-import display "platform/wayland"
+// import display "platform/wayland"
+import display "platform/x11"
 
 Display_State :: display.State
 
@@ -208,10 +209,7 @@ game_loop :: proc(state: ^State) {
 		last_render_time_ns = get_perf_counter_wall_ns()
 		display.submit_first_frame(&state.display)
 	} else {
-		log.error(
-			"back buffer not ready for initial rendering:",
-			state.display.buffers[state.display.back_buffer_index].wl_buffer,
-		)
+		log.error("back buffer not ready for initial rendering")
 		return
 	}
 
@@ -301,10 +299,7 @@ game_loop :: proc(state: ^State) {
 				)
 				display.submit_frame(&state.display)
 			} else {
-				log.warn(
-					"back buffer not ready for rendering:",
-					state.display.buffers[state.display.back_buffer_index].wl_buffer,
-				)
+				log.warn("back buffer not ready for rendering")
 			}
 		}
 

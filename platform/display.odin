@@ -23,7 +23,10 @@ DEFAULT_WINDOW_WIDTH :: 960
 DEFAULT_WINDOW_HEIGHT :: 540
 
 Display_Common :: struct {
+	close_requested: bool,
 	last_frame_time_ns: i64,
+	// Keys that are only used for the engine, not passed to the game code
+	engine_keyboard_input: [Engine_Key]game_api.Button_Input,
 	keyboard_input: game_api.Keyboard_Input,
 	mouse_input: game_api.Mouse_Input,
 }
