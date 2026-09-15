@@ -1116,8 +1116,6 @@ handmade_game_render :: proc "contextless" (
 	context = get_game_context(memory)
 	state := get_game_state(memory)
 
-	defer sim_region_end(state, &state.camera_sim_region)
-
 	// Fill borders
 	frame_buffer_fill(fb, make_pixel(0, 0, 0))
 	// TODO: Scale up rendering instead of just rendering to the center of the
