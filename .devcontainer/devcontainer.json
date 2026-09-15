@@ -1,0 +1,36 @@
+{
+  "build": {
+    "dockerfile": "Dockerfile",
+  },
+  "mounts": [
+      {
+          "source": "${localEnv:XDG_RUNTIME_DIR}/ssh-agent.socket",
+          "target": "/run/ssh-agent.socket",
+          "type": "bind",
+      },
+      {
+          "source": "${localEnv:XDG_RUNTIME_DIR}/${localEnv:WAYLAND_DISPLAY}",
+          "target": "/run/${localEnv:WAYLAND_DISPLAY}",
+          "type": "bind",
+      },
+      {
+          "source": "${localEnv:XDG_RUNTIME_DIR}/pipewire-0",
+          "target": "/run/pipewire-0",
+          "type": "bind",
+      },
+  ],
+  "containerEnv": {
+      "XDG_RUNTIME_DIR": "/run",
+      "SSH_AUTH_SOCK": "/run/ssh-agent.socket",
+      "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}",
+  },
+  "runArgs": ["--privileged"],
+
+  "customizations": {
+    "zed": {
+      "extensions": ["odin", "make"],
+    },
+  },
+
+  "remoteUser": "devcontainer",
+}
