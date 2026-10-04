@@ -1,7 +1,4 @@
 {
-  "inlay_hints": {
-    "enabled": true,
-  },
   "always_treat_brackets_as_autoclosed": true,
   "wrap_guides": [80],
   "languages": {

@@ -1,4 +1,12 @@
-FROM alpine:3.23
+FROM debian:trixie-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential clang unzip wget git openssh-client \
+        nodejs npm \
+        wayland-protocols wayland-utils \
+        pipewire-alsa \
+    && rm -rf /var/lib/apt/lists/*
 
 ARG ODIN_VERSION=dev-2026-09
 ARG ODIN_ARCH=amd64
@@ -6,15 +14,14 @@ RUN wget -O- https://github.com/odin-lang/Odin/releases/download/${ODIN_VERSION}
     | tar x -zv -C /usr/local/ \
     && ln -sv /usr/local/odin-linux-*/odin /usr/local/bin/odin
 
-RUN apk add --no-cache \
-    git openssh-client \
-    make clang-extra-tools \
-    nodejs npm \
-    wayland-dev wayland-libs-cursor wayland-libs-egl libxkbcommon \
-    alsa-lib pipewire-alsa
+ARG OLS_VERSION=2026-08
+ARG OLS_ARCH=x86_64
+RUN wget https://github.com/DanielGavin/ols/releases/download/dev-${OLS_VERSION}/ols-${OLS_ARCH}-unknown-linux-gnu.zip \
+    && unzip ols-${OLS_ARCH}-unknown-linux-gnu.zip -d /usr/local/ols \
+    && ln -sv /usr/local/ols/ols-${OLS_ARCH}-unknown-linux-gnu /usr/local/bin/ols \
+    && ln -sv /usr/local/ols/odinfmt-${OLS_ARCH}-unknown-linux-gnu /usr/local/bin/odinfmt
 
 ARG USERNAME=devcontainer
 ARG UID=1000
 ARG GID=1000
-RUN addgroup -g $GID $USERNAME && \
-    adduser -u $UID -G $USERNAME -D $USERNAME
+RUN useradd -mUu $UID -s /bin/bash $USERNAME
