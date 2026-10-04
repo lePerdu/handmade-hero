@@ -30,19 +30,25 @@ Sim_Entity :: struct {
 	// Flag to indicate removal from world chunk storage when the `Sim_Region`
 	// ends
 	remove: bool,
+	// Entity is checked for collision only, not updated
+	simulatable: bool,
 }
 
 sim_region_begin :: proc(
 	state: ^State,
 	origin: World_Pos,
 	dim: [2]f32,
+	collision_buffer_radius: f32,
 	allocator := context.temp_allocator,
 ) -> Sim_Region {
 	// TODO: Set upper bound on allocation?
 	sim_entities: [dynamic]Sim_Entity
 	sim_entities.allocator = allocator
 
-	// For checking positions relative to sim_origin
+	// TODO: Just store dims here since both rects are centered at origin
+	// All entities that will be pulled in
+	collision_rect := make_rect_center_dim([2]f32{}, dim + collision_buffer_radius)
+	// Entities that will be simulated
 	sim_rect := make_rect_center_dim([2]f32{}, dim)
 
 	// Min/max tile to search, found by extending the player's position by
@@ -58,13 +64,14 @@ sim_region_begin :: proc(
 	for entity_id in world_entity_xy_next(&state.world, &entity_iter) {
 		entity := get_entity(state, entity_id) or_continue
 		rel_pos := world_pos_sub_xy(entity.pos, origin)
-		if rect_contains(sim_rect, rel_pos) {
+		if rect_contains(collision_rect, rel_pos) {
 			_, err := append(
 				&sim_entities,
 				Sim_Entity {
 					common = entity.common,
 					storage_id = entity_id,
 					local_pos = {rel_pos.x, rel_pos.y, entity.z},
+					simulatable = rect_contains(sim_rect, rel_pos),
 				},
 			)
 			assert(err == nil)

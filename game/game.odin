@@ -570,8 +570,10 @@ handmade_game_update :: proc "contextless" (
 	sim_region_end(state, &state.camera_sim_region)
 	state.camera_sim_region = sim_region_begin(
 		state,
-		state.camera_pos,
-		CAMERA_SIM_DIM,
+		origin = state.camera_pos,
+		dim = CAMERA_SIM_DIM,
+		// TODO: Figure out reasonable value (max distance an entity might move)
+		buffer_radius = 1,
 	)
 	// sim_region_end() called after render
 
@@ -602,7 +604,9 @@ handmade_game_update :: proc "contextless" (
 	// )
 
 	for &sim in state.camera_sim_region.entities {
-		update_entity(state, state.camera_sim_region, &sim, dt_sec)
+		if sim.simulatable {
+			update_entity(state, state.camera_sim_region, &sim, dt_sec)
+		}
 	}
 }
 
